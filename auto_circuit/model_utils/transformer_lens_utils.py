@@ -27,7 +27,7 @@ def factorized_src_nodes(model: tl.HookedTransformer) -> Set[SrcNode]:
             name="Resid Start",
             module_name="blocks.0.hook_resid_pre",
             layer=next(layers),
-            src_idx=next(idxs),
+            global_rank=next(idxs),
             weight="embed.W_E",
         )
     )
@@ -40,7 +40,7 @@ def factorized_src_nodes(model: tl.HookedTransformer) -> Set[SrcNode]:
                     name=f"A{block_idx}.{head_idx}",
                     module_name=f"blocks.{block_idx}.attn.hook_result",
                     layer=layer,
-                    src_idx=next(idxs),
+                    global_rank=next(idxs),
                     head_dim=2,
                     head_idx=head_idx,
                     weight=f"blocks.{block_idx}.attn.W_O",
@@ -53,7 +53,7 @@ def factorized_src_nodes(model: tl.HookedTransformer) -> Set[SrcNode]:
                     name=f"MLP {block_idx}",
                     module_name=f"blocks.{block_idx}.hook_mlp_out",
                     layer=layer if model.cfg.parallel_attn_mlp else next(layers),
-                    src_idx=next(idxs),
+                    global_rank=next(idxs),
                     weight=f"blocks.{block_idx}.mlp.W_out",
                 )
             )
@@ -153,7 +153,7 @@ def simple_graph_nodes(
                 if first_block
                 else f"blocks.{block_idx - 1}.hook_resid_post",
                 layer=layer,
-                src_idx=min_src_idx,
+                global_rank=min_src_idx,
             )
         )
         for head_idx in range(model.cfg.n_heads):
@@ -162,7 +162,7 @@ def simple_graph_nodes(
                     name=f"A{block_idx}.{head_idx}",
                     module_name=f"blocks.{block_idx}.attn.hook_result",
                     layer=layer,
-                    src_idx=next(src_idxs),
+                    global_rank=next(src_idxs),
                     head_idx=head_idx,
                     head_dim=2,
                     weight=f"blocks.{block_idx}.attn.W_O",
@@ -176,7 +176,7 @@ def simple_graph_nodes(
                     name=f"Resid Mid {block_idx}",
                     module_name=f"blocks.{block_idx}.hook_resid_mid",
                     layer=layer,
-                    min_src_idx=min_src_idx,
+                    min_layer=min_src_idx,
                 )
             )
             min_src_idx = next(src_idxs)
@@ -185,7 +185,7 @@ def simple_graph_nodes(
                     name=f"Resid Mid {block_idx}",
                     module_name=f"blocks.{block_idx}.hook_resid_mid",
                     layer=layer,
-                    src_idx=min_src_idx,
+                    global_rank=min_src_idx,
                 )
             )
         if not model.cfg.attn_only:
@@ -194,7 +194,7 @@ def simple_graph_nodes(
                     name=f"MLP {block_idx}",
                     module_name=f"blocks.{block_idx}.hook_mlp_out",
                     layer=layer,
-                    src_idx=next(src_idxs),
+                    global_rank=next(src_idxs),
                     weight=f"blocks.{block_idx}.mlp.W_out",
                 )
             )
@@ -205,7 +205,7 @@ def simple_graph_nodes(
                 name="Resid End" if last_block else f"Resid Post {block_idx}",
                 module_name=f"blocks.{block_idx}.hook_resid_post",
                 layer=layer,
-                min_src_idx=min_src_idx,
+                min_layer=min_src_idx,
             )
         )
         min_src_idx = next(src_idxs)

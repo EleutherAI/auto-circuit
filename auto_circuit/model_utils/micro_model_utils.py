@@ -62,7 +62,7 @@ def factorized_src_nodes(model: MicroModel) -> Set[SrcNode]:
             name="Resid Start",
             module_name="input",
             layer=next(layers),
-            src_idx=next(idxs),
+            global_rank=next(idxs),
         )
     )
     for layer_idx in range(model.n_layers):
@@ -73,7 +73,7 @@ def factorized_src_nodes(model: MicroModel) -> Set[SrcNode]:
                     name=f"B{layer_idx}.{elem}",
                     module_name=f"blocks.{layer_idx}.head_outputs",
                     layer=layer,
-                    src_idx=next(idxs),
+                    global_rank=next(idxs),
                     head_idx=elem,
                     head_dim=2,
                     weight="weights",
@@ -133,7 +133,7 @@ def simple_graph_nodes(model: MicroModel) -> Tuple[Set[SrcNode], Set[DestNode]]:
                 name="Resid Start" if first_block else f"Resid Post {layer_idx -1}",
                 module_name="input" if first_block else f"resids.{layer_idx - 1}",
                 layer=layer,
-                src_idx=min_src_idx,
+                global_rank=min_src_idx,
             )
         )
         for elem in [0, 1]:
@@ -142,7 +142,7 @@ def simple_graph_nodes(model: MicroModel) -> Tuple[Set[SrcNode], Set[DestNode]]:
                     name=f"B{layer_idx}.{elem}",
                     module_name=f"blocks.{layer_idx}.head_outputs",
                     layer=layer,
-                    src_idx=next(src_idxs),
+                    global_rank=next(src_idxs),
                     head_idx=elem,
                     head_dim=2,
                     weight="weights",
@@ -156,7 +156,7 @@ def simple_graph_nodes(model: MicroModel) -> Tuple[Set[SrcNode], Set[DestNode]]:
                 name="Resid End" if last_block else f"Resid Post {layer_idx}",
                 module_name="output" if last_block else f"resids.{layer_idx}",
                 layer=layer,
-                min_src_idx=min_src_idx,
+                min_layer=min_src_idx,
             )
         )
     return src_nodes, dest_nodes

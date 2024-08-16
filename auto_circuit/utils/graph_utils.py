@@ -1,5 +1,6 @@
 #%%
 import math
+import pdb
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import chain, product
@@ -7,7 +8,9 @@ from typing import Collection, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch as t
 from transformer_lens import HookedTransformer, HookedTransformerKeyValueCache
+from transformers import ConvNextV2ForImageClassification
 
+import auto_circuit.model_utils.convnext_utils as cn_utils
 import auto_circuit.model_utils.micro_model_utils as mm_utils
 import auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer as sae_utils
 import auto_circuit.model_utils.transformer_lens_utils as tl_utils
@@ -15,6 +18,7 @@ from auto_circuit.model_utils.micro_model_utils import MicroModel
 from auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer import (
     AutoencoderTransformer,
 )
+from auto_circuit.type_utils import slice_src_nodes
 from auto_circuit.types import (
     DestNode,
     Edge,
@@ -81,6 +85,11 @@ def patchable_model(
     is_tl_transformer = isinstance(model, HookedTransformer)
     is_autoencoder_transformer = isinstance(model, AutoencoderTransformer)
     is_transformer = is_tl_transformer or is_autoencoder_transformer
+
+    downsample_modules: List[t.nn.Module] = []
+    if isinstance(model, ConvNextV2ForImageClassification):
+        downsample_modules = cn_utils.get_downsample_modules(model)
+
     return PatchableModel(
         nodes=nodes,
         srcs=srcs,
@@ -98,6 +107,7 @@ def patchable_model(
         separate_qkv=separate_qkv,
         kv_caches=kv_caches,
         wrapped_model=model,
+        downsample_modules=downsample_modules,
     )
 
 
@@ -150,6 +160,8 @@ def graph_edges(
             srcs, dests = mm_utils.simple_graph_nodes(model)
         elif isinstance(model, HookedTransformer):
             srcs, dests = tl_utils.simple_graph_nodes(model)
+        elif isinstance(model, ConvNextV2ForImageClassification):
+            srcs, dests = cn_utils.simple_graph_nodes(model)
         else:
             raise NotImplementedError(model)
         for i in [None] if seq_len is None else range(seq_len):
@@ -167,6 +179,9 @@ def graph_edges(
             assert separate_qkv is not None, "separate_qkv must be specified for LLM"
             srcs: Set[SrcNode] = sae_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
+        elif isinstance(model, ConvNextV2ForImageClassification):
+            srcs: Set[SrcNode] = cn_utils.factorized_src_nodes(model)
+            dests: Set[DestNode] = cn_utils.factorized_dest_nodes(model)
         else:
             raise NotImplementedError(model)
         for i in [None] if seq_len is None else range(seq_len):
@@ -220,32 +235,69 @@ def make_model_patchable(
     [node_dict[node.module_name].add(node) for node in nodes]
     wrappers, src_wrappers, dest_wrappers = set(), set(), set()
     dtype = next(model.parameters()).dtype
+    downsample_modules: List[t.nn.Module] = []
+    if isinstance(model, ConvNextV2ForImageClassification):
+        downsample_modules = cn_utils.get_downsample_modules(model)
+
+    a_src_node = next(n for n in src_nodes)
 
     for module_name, module_nodes in node_dict.items():
         module = module_by_name(model, module_name)
         src_idxs_slice = None
         a_node = next(iter(module_nodes))
         head_dim = a_node.head_dim
+        stage = a_node.stage
         assert all([node.head_dim == head_dim for node in module_nodes])
+        assert all([node.stage == stage for node in module_nodes])
 
         if is_src := any([type(node) == SrcNode for node in module_nodes]):
-            src_idxs = [n.src_idx for n in module_nodes if type(n) == SrcNode]
-            src_idxs_slice = slice(min(src_idxs), max(src_idxs) + 1)
-            assert src_idxs_slice.stop - src_idxs_slice.start == len(src_idxs)
+            src_nodes_for_module = [n for n in module_nodes if type(n) == SrcNode]
+            src_idxs_slice = slice_src_nodes(
+                min(src_nodes_for_module), max(src_nodes_for_module)
+            )
+            assert (max(src_nodes_for_module).global_rank + 1) - min(
+                src_nodes_for_module
+            ).global_rank == len(src_nodes_for_module)
 
         mask, in_srcs = None, None
         if is_dest := any([type(node) == DestNode for node in module_nodes]):
             module_dest_count = len([n for n in module_nodes if type(n) == DestNode])
+
             if factorized:
-                n_in_src = len([n for n in src_nodes if n.layer < a_node.layer])
+                if a_src_node.sublayer_shape is not None:
+                    n_in_src = len(
+                        set([n.layer for n in src_nodes if n.layer < a_node.layer])
+                    )
+                else:
+                    n_in_src = len([n for n in src_nodes if n.layer < a_node.layer])
                 n_ignore_src = 0
             else:
-                n_in_src = len([n for n in src_nodes if n.layer + 1 == a_node.layer])
-                n_ignore_src = len([n for n in src_nodes if n.layer + 1 < a_node.layer])
+                if a_src_node.sublayer_shape is not None:
+                    n_in_src = len(
+                        set([n.layer for n in src_nodes if n.layer + 1 == a_node.layer])
+                    )
+                    n_ignore_src = len(
+                        set([n.layer for n in src_nodes if n.layer + 1 < a_node.layer])
+                    )
+                else:
+                    n_in_src = len(
+                        [n for n in src_nodes if n.layer + 1 == a_node.layer]
+                    )
+                    n_ignore_src = len(
+                        [n for n in src_nodes if n.layer + 1 < a_node.layer]
+                    )
+
+            if n_in_src == 0:
+                pdb.set_trace()
             in_srcs = slice(n_ignore_src, n_ignore_src + n_in_src)
             seq_shape = [seq_len] if seq_len is not None else []
             head_shape = [module_dest_count] if head_dim is not None else []
-            mask_shape = seq_shape + head_shape + [n_in_src]
+            n_heads = (
+                [a_node.sublayer_shape] if a_node.sublayer_shape is not None else []
+            )
+            mask_shape = seq_shape + head_shape + [n_in_src] + n_heads
+            if mask_shape == [96, 1, 384]:
+                pdb.set_trace()
             mask = t.zeros(mask_shape, device=device, dtype=dtype, requires_grad=False)
 
         wrapper = PatchWrapperImpl(
@@ -258,6 +310,11 @@ def make_model_patchable(
             is_dest=is_dest,
             patch_mask=mask,
             in_srcs=in_srcs,
+            stage=stage,
+            downsample_modules=downsample_modules[:stage],
+            sublayer_index=a_src_node.sublayer_shape is not None
+            if a_src_node is not None
+            else False,
         )
         set_module_by_name(model, module_name, wrapper)
         wrappers.add(wrapper)
@@ -270,9 +327,9 @@ def make_model_patchable(
 @contextmanager
 def patch_mode(
     model: PatchableModel,
-    patch_src_outs: t.Tensor,
+    patch_src_outs: Dict[int, t.Tensor],
     edges: Optional[Collection[str | Edge]] = None,
-    curr_src_outs: Optional[t.Tensor] = None,
+    curr_src_outs: Optional[Dict[int, t.Tensor]] = None,
 ):
     """
     Context manager to enable patching in the model.
@@ -296,7 +353,10 @@ def patch_mode(
         This function modifies the state of the model! This is a likely source of bugs.
     """
     if curr_src_outs is None:
-        curr_src_outs = t.zeros_like(patch_src_outs)
+        curr_src_outs = {
+            k: t.zeros_like(v, device=v.device, dtype=v.dtype)
+            for k, v in patch_src_outs.items()
+        }
 
     # TODO: Raise an error if one of the edge names doesn't exist.
     if edges is not None:

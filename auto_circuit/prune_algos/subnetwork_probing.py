@@ -120,7 +120,7 @@ def subnetwork_probing_prune_scores(
                 val_clean_out = model(batch.clean)[out_slice]
                 val_clean_logits[batch.key] = log_softmax(val_clean_out, dim=-1)
 
-    src_outs: Dict[BatchKey, t.Tensor] = batch_src_ablations(
+    src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
         model,
         dataloader,
         # ablation_type=AblationType.RESAMPLE,
@@ -128,7 +128,7 @@ def subnetwork_probing_prune_scores(
         # clean_corrupt="corrupt" if tree_optimisation else "clean",
     )
 
-    val_src_outs: Optional[Dict[BatchKey, t.Tensor]] = None
+    val_src_outs: Optional[Dict[BatchKey, Dict[int, t.Tensor]]] = None
     if validation_dataloader is not None:
         val_src_outs = batch_src_ablations(
             model,
@@ -149,7 +149,9 @@ def subnetwork_probing_prune_scores(
             epoch_pbar.set_description_str(f"{SP} Epoch {epoch} " + desc, refresh=False)
             for batch_idx, batch in enumerate(dataloader):
                 input_batch = batch.clean if tree_optimisation else batch.corrupt
-                patch_outs = src_outs[batch.key].clone().detach()
+                patch_outs = {
+                    k: v.clone().detach() for k, v in src_outs[batch.key].items()
+                }
                 with patch_mode(model, patch_outs):
                     train_logits = model(input_batch)[out_slice]
                     if faithfulness_target == "kl_div":
@@ -205,7 +207,10 @@ def subnetwork_probing_prune_scores(
                     ):
                         if validation_idx == batch_idx:
                             val_batch = validation_batch
-                    val_patch_outs = val_src_outs[val_batch.key].clone().detach()
+                    val_patch_outs = {
+                        k: v.clone().detach()
+                        for k, v in val_src_outs[val_batch.key].items()
+                    }
                     with patch_mode(model, val_patch_outs), t.no_grad():
                         val_input_batch = (
                             val_batch.clean if tree_optimisation else val_batch.corrupt

@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import reduce
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Set
+from typing import Any, Dict, Iterator, List, Optional, Set
 
 import torch as t
 from einops import einsum
@@ -216,3 +216,15 @@ def get_most_similar_embeddings(
             f"Prob: {sorted_token_probs[i].item():6.2%}",
             f'Token: "{model.to_string(sorted_token_values[i])}"',
         )
+
+
+def downsample_activations(
+    downsample_modules: List[t.nn.Module],
+    activations: t.Tensor,
+    src_stage: int,
+    dest_stage: int,
+) -> t.Tensor:
+
+    for module in downsample_modules:
+        activations = module(activations)
+    return activations

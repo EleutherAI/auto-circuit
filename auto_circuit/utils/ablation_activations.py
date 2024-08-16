@@ -3,11 +3,12 @@ from functools import partial
 from typing import Dict, List, Literal, Optional, Tuple
 
 import torch as t
+from einops import rearrange
 from torch import inference_mode
 
 from auto_circuit.data import BatchKey, PromptDataLoader
 from auto_circuit.types import AblationType, SrcNode
-from auto_circuit.utils.misc import remove_hooks
+from auto_circuit.utils.misc import downsample_activations, remove_hooks
 from auto_circuit.utils.patchable_model import PatchableModel
 
 
@@ -18,6 +19,7 @@ def src_out_hook(
     src_nodes: List[SrcNode],
     src_outs: Dict[SrcNode, t.Tensor],
     ablation_type: AblationType,
+    sublayer_index: bool = False,
 ):
     assert not ablation_type.mean_over_dataset
     if ablation_type == AblationType.RESAMPLE:
@@ -33,10 +35,15 @@ def src_out_hook(
     else:
         raise NotImplementedError(ablation_type)
 
-    head_dim: Optional[int] = src_nodes[0].head_dim
+    head_dim: Optional[int] = None if sublayer_index else src_nodes[0].head_dim
     out = out if head_dim is None else out.split(1, dim=head_dim)
-    for s in src_nodes:
-        src_outs[s] = out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
+    if sublayer_index:
+        src_outs[src_nodes[0]] = out
+    else:
+        for s in src_nodes:
+            src_outs[s] = (
+                out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
+            )
 
 
 def mean_src_out_hook(
@@ -46,26 +53,33 @@ def mean_src_out_hook(
     src_nodes: List[SrcNode],
     src_outs: Dict[SrcNode, t.Tensor],
     ablation_type: AblationType,
+    sublayer_index: bool = False,
 ):
     assert ablation_type.mean_over_dataset
     repeats = [out.size(0)] + [1] * (out.ndim - 1)
     out = out.mean(dim=0, keepdim=True).repeat(repeats)
 
-    head_dim: Optional[int] = src_nodes[0].head_dim
+    head_dim: Optional[int] = None if sublayer_index else src_nodes[0].head_dim
     out = out if head_dim is None else out.split(1, dim=head_dim)
-    for s in src_nodes:
-        src_out = out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
-        if s not in src_outs:
-            src_outs[s] = src_out
+    if sublayer_index:
+        if src_nodes[0] not in src_outs:
+            src_outs[src_nodes[0]] = out
         else:
-            src_outs[s] += src_out
+            src_outs[src_nodes[0]] += out
+    else:
+        for s in src_nodes:
+            src_out = out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
+            if s not in src_outs:
+                src_outs[s] = src_out
+            else:
+                src_outs[s] += src_out
 
 
 def src_ablations(
     model: PatchableModel,
     sample: t.Tensor | PromptDataLoader,
     ablation_type: AblationType = AblationType.RESAMPLE,
-) -> t.Tensor:
+) -> Dict[int, t.Tensor]:
     """
     Get the activations used to ablate each [`Edge`][auto_circuit.types.Edge] in a
     model, given a particular set of model inputs and an ablation type. See
@@ -79,14 +93,16 @@ def src_ablations(
         ablation_type: The type of ablation to perform.
 
     Returns:
-        A tensor of activations used to ablated each [`Edge`][auto_circuit.types.Edge]
-            model on the given input.  Shape is `[Srcs, ...]` where `Srcs` is the number
-            of [`SrcNode`][auto_circuit.types.SrcNode]s in the model and `...` is the
-            shape of the activations of the model. In a transformer this will be
-            `[Srcs, batch, seq, d_model]`.
+        A dictionary mapping stage indices to tensors of activations used to ablate
+        each [`Edge`][auto_circuit.types.Edge] model on the given input. The shape
+        of the tensor is `[Srcs, ...]` where `Srcs` is the number of
+        [`SrcNode`][auto_circuit.types.SrcNode]s in the model and `...` is the
+        shape of the activations of the model. In a transformer this will be
+        `[Srcs, batch, seq, d_model]`.
     """
     src_outs: Dict[SrcNode, t.Tensor] = {}
     src_modules: Dict[t.nn.Module, List[SrcNode]] = defaultdict(list)
+    src_outs_per_stage: Dict[int, t.Tensor] = {}
     [src_modules[src.module(model)].append(src) for src in model.srcs]
     with remove_hooks() as handles, inference_mode():
         # Install hooks to collect activations at each src module
@@ -96,6 +112,7 @@ def src_ablations(
                 src_nodes=src_nodes,
                 src_outs=src_outs,
                 ablation_type=ablation_type,
+                sublayer_index=bool(src_nodes[0].sublayer_shape),
             )
             handles.add(mod.register_forward_hook(hook_fn))
 
@@ -119,8 +136,34 @@ def src_ablations(
 
     # Sort the src_outs dict by node idx
     src_outs = dict(sorted(src_outs.items(), key=lambda x: x[0].src_idx))
-    assert [src.src_idx for src in src_outs.keys()] == list(range(len(src_outs)))
-    return t.stack(list(src_outs.values())).detach()
+
+    for i in range(len(model.downsample_modules) + 1):
+        stage_activations = []
+
+        for j in range(i + 1):
+            idxs = [
+                src.src_idx for src in src_outs.keys() if src.module(model).stage == j
+            ]
+            for k, v in src_outs.items():
+                if k.src_idx in idxs:
+                    stage_activations.append(
+                        downsample_activations(
+                            model.downsample_modules[j:i], v.clone().detach(), j, i
+                        )
+                    )
+
+        # TODO: handle the case where there are no head dims
+        a_node = next(n for n in src_outs.keys() if n.head_dim is not None)
+        if a_node.sublayer_shape is not None:
+            assert a_node.head_dim is not None
+            src_outs_per_stage[i] = rearrange(
+                t.cat(stage_activations, dim=a_node.head_dim),
+                "b (l ch) ... -> l b ch ...",
+                ch=stage_activations[0].shape[a_node.head_dim],
+            )
+        else:
+            src_outs_per_stage[i] = t.stack(stage_activations)
+    return src_outs_per_stage
 
 
 def batch_src_ablations(
@@ -128,7 +171,7 @@ def batch_src_ablations(
     dataloader: PromptDataLoader,
     ablation_type: AblationType = AblationType.RESAMPLE,
     clean_corrupt: Optional[Literal["clean", "corrupt"]] = None,
-) -> Dict[BatchKey, t.Tensor]:
+) -> Dict[BatchKey, Dict[int, t.Tensor]]:
     """
     Wrapper of [`src_ablations`][auto_circuit.utils.ablation_activations.src_ablations]
     that returns ablations for each batch in a dataloader.
@@ -152,7 +195,7 @@ def batch_src_ablations(
     ]
     assert (clean_corrupt is not None) == (ablation_type in batch_specific_ablation)
 
-    patch_outs: Dict[BatchKey, t.Tensor] = {}
+    patch_outs: Dict[BatchKey, Dict[int, t.Tensor]] = {}
     if ablation_type.mean_over_dataset:
         mean_patch = src_ablations(model, dataloader, ablation_type)
         patch_outs = {batch.key: mean_patch for batch in dataloader}
@@ -162,5 +205,7 @@ def batch_src_ablations(
                 input_batch = batch.clean
             else:
                 input_batch = batch.clean if clean_corrupt == "clean" else batch.corrupt
-            patch_outs[batch.key] = src_ablations(model, input_batch, ablation_type)
+            patch_outs[batch.key] = src_ablations(
+                model, input_batch.to(model.wrapped_model.device), ablation_type
+            )
     return patch_outs

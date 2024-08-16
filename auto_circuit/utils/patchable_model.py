@@ -76,6 +76,7 @@ class PatchableModel(t.nn.Module):
     separate_qkv: Optional[bool]
     kv_caches: Optional[Dict[int, HookedTransformerKeyValueCache]]
     wrapped_model: t.nn.Module
+    downsample_modules: List[t.nn.Module]
 
     def __init__(
         self,
@@ -95,6 +96,7 @@ class PatchableModel(t.nn.Module):
         separate_qkv: Optional[bool],
         kv_caches: Tuple[Optional[HookedTransformerKeyValueCache], ...],
         wrapped_model: t.nn.Module,
+        downsample_modules: List[t.nn.Module] = [],
     ) -> None:
         super().__init__()
         self.nodes = nodes
@@ -129,6 +131,7 @@ class PatchableModel(t.nn.Module):
                     batch_size = kv_cache.previous_attention_mask.shape[0]
                     self.kv_caches[batch_size] = kv_cache
         self.wrapped_model = wrapped_model
+        self.downsample_modules = downsample_modules
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """

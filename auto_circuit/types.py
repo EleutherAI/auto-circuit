@@ -188,6 +188,8 @@ class Node:
         weight_head_dim: The dimension of the head in the weight tensor that corresponds
             to the node. Not currently used, but could be used by a circuit finding
             algorithm.
+        stage: The stage of the model that the node is in (uniformly 0 for stageless
+            models).
     """
 
     name: str
@@ -197,6 +199,8 @@ class Node:
     head_dim: Optional[int] = None
     weight: Optional[str] = None
     weight_head_dim: Optional[int] = None
+    stage: int = 0
+    sublayer_shape: Optional[int] = None
 
     def module(self, model: Any) -> PatchWrapper:
         """
@@ -224,14 +228,45 @@ class Node:
 class SrcNode(Node):
     """A node that is the source of an edge."""
 
-    src_idx: int = 0  # Index of the node across all src nodes in all layers
+    global_rank: int = 0  # Index of the node across all src nodes in all layers
+
+    def d(self, other: "SrcNode") -> int:
+        """
+        Integer gap between two SrcNodes
+        """
+        return self.global_rank - other.global_rank
+
+    def __lt__(self, other: "SrcNode") -> bool:
+        return self.global_rank < other.global_rank
+
+    @property
+    def src_idx(self) -> int | Tuple[int, int | slice]:
+        if self.sublayer_shape is not None:
+            if self.head_idx is None:
+                return self.layer, slice(None)
+            return self.layer, self.head_idx
+        else:
+            return self.global_rank
+
+    def offset_slice(self, offset: int) -> List[int | slice]:
+        """
+        Get index of this node with a given layer offset
+        """
+        if self.sublayer_shape is not None:
+            if self.head_idx is None:
+                return [self.layer - offset, slice(None)]
+            return [self.layer - offset, self.head_idx]
+        else:
+            return [
+                self.global_rank - offset,
+            ]
 
 
 @dataclass(frozen=True)
 class DestNode(Node):
     """A node that is the destination of an edge."""
 
-    min_src_idx: int = 0  # min src_idx of all incoming SrcNodes (0 in factorized model)
+    min_layer: int = 0  # min layer of all incoming SrcNodes (0 in factorized model)
 
 
 PruneScores = Dict[str, t.Tensor]
@@ -267,12 +302,12 @@ class Edge:
         return f"{self.src.name}->{self.dest.name}"
 
     @property
-    def patch_idx(self) -> Tuple[int, ...]:
+    def patch_idx(self) -> Tuple[int | slice, ...]:
         """The index of the edge in the `patch_mask` or
         [`PruneScores`][auto_circuit.types.PruneScores] tensor of the `dest` node."""
         seq_idx = [] if self.seq_idx is None else [self.seq_idx]
         head_idx = [] if self.dest.head_idx is None else [self.dest.head_idx]
-        return tuple(seq_idx + head_idx + [self.src.src_idx - self.dest.min_src_idx])
+        return tuple(seq_idx + head_idx + self.src.offset_slice(self.dest.min_layer))
 
     def patch_mask(self, model: Any) -> t.nn.Parameter:
         """The `patch_mask` tensor of the `dest` node."""

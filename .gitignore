@@ -10,3 +10,4 @@ figure*/
 .gitignore.swp
 *.interactive
 /*.png
+notebooks/
