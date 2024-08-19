@@ -37,13 +37,14 @@ def test_instance_grads(mini_tl_transformer: HookedTransformer):
     src_patch_out = src_ablations(
         model, next(iter(train_loader)).clean, ablation_type=AblationType.ZERO
     )
+    src_patch_out = {k: v.clone().detach() for k, v in src_patch_out.items()}
 
     # collecting prune scores batches for each module, concatenated after
     prune_scores_batch: PruneScores = {}
     with set_mask_batch_size(model, batch_size), train_mask_mode(model):
         set_all_masks(model, val=0.0)
         for batch in train_loader:
-            with patch_mode(model, src_patch_out.clone().detach()):
+            with patch_mode(model, src_patch_out):
                 # combine clean and corrupt to get different values for testing
                 logits = model(t.cat([batch.clean[0:1], batch.corrupt[0:1]]))[
                     model.out_slice

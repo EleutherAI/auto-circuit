@@ -124,7 +124,7 @@ def train_same_under_knockout_prune_scores(
     model = task.model
     n_target = int(circuit_size / 5)
 
-    corrupt_src_outs: Dict[BatchKey, t.Tensor] = batch_src_ablations(
+    corrupt_src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
         model,
         task.test_loader,
         ablation_type=AblationType.RESAMPLE,
@@ -148,7 +148,10 @@ def train_same_under_knockout_prune_scores(
             kl_str = faith_history[-1] if len(faith_history) > 0 else None
             epoch_pbar.set_description_str(f"Epoch: {epoch}, KL Div: {kl_str}")
             for batch in task.test_loader:
-                patches = corrupt_src_outs[batch.key].clone().detach()
+                patches = {
+                    k: v.clone().detach()
+                    for k, v in corrupt_src_outs[batch.key].items()
+                }
                 with patch_mode(model, patches), mask_fn_mode(model, mask_fn):
                     optim.zero_grad()
                     model.zero_grad()

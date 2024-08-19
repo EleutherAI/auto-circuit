@@ -63,7 +63,7 @@ def mask_gradient_prune_scores(
     model = model
     out_slice = model.out_slice
 
-    src_outs: Dict[BatchKey, t.Tensor] = batch_src_ablations(
+    src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
         model,
         dataloader,
         ablation_type=ablation_type,
@@ -81,7 +81,9 @@ def mask_gradient_prune_scores(
                 set_all_masks(model, val=mask_val)
 
             for batch in dataloader:
-                patch_src_outs = src_outs[batch.key].clone().detach()
+                patch_src_outs = {
+                    k: v.clone().detach() for k, v in src_outs[batch.key].items()
+                }
                 with patch_mode(model, patch_src_outs):
                     logits = model(batch.clean)[out_slice]
                     if grad_function == "logit":

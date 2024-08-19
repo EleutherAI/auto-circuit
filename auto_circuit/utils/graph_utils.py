@@ -201,7 +201,9 @@ def make_model_patchable(
     device: t.device,
     seq_len: Optional[int] = None,
     seq_dim: Optional[int] = None,
-) -> Tuple[Set[PatchWrapperImpl], Set[PatchWrapperImpl], Set[PatchWrapperImpl]]:
+) -> Tuple[
+    Dict[str, Set[PatchWrapperImpl]], Set[PatchWrapperImpl], Set[PatchWrapperImpl]
+]:
     """
     Injects [`PatchWrapper`][auto_circuit.types.PatchWrapper]s into the model at the
     node positions to enable patching.
@@ -233,7 +235,7 @@ def make_model_patchable(
     """
     node_dict: Dict[str, Set[Node]] = defaultdict(set)
     [node_dict[node.module_name].add(node) for node in nodes]
-    wrappers, src_wrappers, dest_wrappers = set(), set(), set()
+    wrappers, src_wrappers, dest_wrappers = defaultdict(set), set(), set()
     dtype = next(model.parameters()).dtype
     downsample_modules: List[t.nn.Module] = []
     if isinstance(model, ConvNextV2ForImageClassification):
@@ -317,7 +319,7 @@ def make_model_patchable(
             else False,
         )
         set_module_by_name(model, module_name, wrapper)
-        wrappers.add(wrapper)
+        wrappers[module_name].add(wrapper)
         src_wrappers.add(wrapper) if is_src else None
         dest_wrappers.add(wrapper) if is_dest else None
 
@@ -365,19 +367,21 @@ def patch_mode(
             if edge in edges or edge.name in edges:
                 edge.patch_mask(model).data[edge.patch_idx] = 1.0
 
-    for wrapper in model.wrappers:
-        wrapper.patch_mode = True
-        wrapper.curr_src_outs = curr_src_outs
-        if wrapper.is_dest:
-            wrapper.patch_src_outs = patch_src_outs
+    for module_wrappers in model.wrappers.values():
+        for wrapper in module_wrappers:
+            wrapper.patch_mode = True
+            wrapper.curr_src_outs = curr_src_outs
+            if wrapper.is_dest:
+                wrapper.patch_src_outs = patch_src_outs
     try:
         yield
     finally:
-        for wrapper in model.wrappers:
-            wrapper.patch_mode = False
-            wrapper.curr_src_outs = None
-            if wrapper.is_dest:
-                wrapper.patch_src_outs = None
+        for module_wrappers in model.wrappers.values():
+            for wrapper in module_wrappers:
+                wrapper.patch_mode = False
+                wrapper.curr_src_outs = None
+                if wrapper.is_dest:
+                    wrapper.patch_src_outs = None
         del curr_src_outs, patch_src_outs
 
 
@@ -392,9 +396,10 @@ def set_all_masks(model: PatchableModel, val: float) -> None:
     Warning:
         This function modifies the state of the model! This is a likely source of bugs.
     """
-    for wrapper in model.wrappers:
-        if wrapper.is_dest:
-            t.nn.init.constant_(wrapper.patch_mask, val)
+    for module_wrappers in model.wrappers.values():
+        for wrapper in module_wrappers:
+            if wrapper.is_dest:
+                t.nn.init.constant_(wrapper.patch_mask, val)
 
 
 @contextmanager

@@ -203,7 +203,7 @@ def factorized_src_nodes(model: AutoencoderTransformer) -> Set[SrcNode]:
             name="Resid Start",
             module_name="blocks.0.hook_resid_pre",
             layer=next(layers),
-            src_idx=next(idxs),
+            global_rank=next(idxs),
             weight="embed.W_E",
         )
     )
@@ -216,7 +216,7 @@ def factorized_src_nodes(model: AutoencoderTransformer) -> Set[SrcNode]:
                     name=f"A{block_idx}.{head_idx}",
                     module_name=f"blocks.{block_idx}.attn.hook_result",
                     layer=layer,
-                    src_idx=next(idxs),
+                    global_rank=next(idxs),
                     head_dim=2,
                     head_idx=head_idx,
                     weight=f"blocks.{block_idx}.attn.W_O",
@@ -230,7 +230,7 @@ def factorized_src_nodes(model: AutoencoderTransformer) -> Set[SrcNode]:
                     name=f"MLP {block_idx} Latent {latent_idx}",
                     module_name=f"blocks.{block_idx}.hook_mlp_out.latent_outs",
                     layer=layer,
-                    src_idx=next(idxs),
+                    global_rank=next(idxs),
                     head_dim=2,
                     head_idx=latent_idx,
                     weight=f"blocks.{block_idx}.hook_mlp_out.decoder.weight",

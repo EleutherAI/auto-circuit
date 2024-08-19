@@ -58,7 +58,7 @@ def run_circuits(
     circ_outs: CircuitOutputs = defaultdict(dict)
     desc_ps: t.Tensor = desc_prune_scores(prune_scores)
 
-    patch_src_outs: Optional[t.Tensor] = None
+    patch_src_outs: Optional[dict[int, t.Tensor]] = None
     if ablation_type.mean_over_dataset:
         patch_src_outs = src_ablations(model, dataloader, ablation_type)
 

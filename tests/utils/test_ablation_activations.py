@@ -1,4 +1,6 @@
 #%%
+from typing import Dict
+
 import torch as t
 
 from auto_circuit.data import PromptDataLoader, PromptDataset
@@ -71,12 +73,16 @@ def test_resample_and_zero_src_ablations(micro_model: t.nn.Module):
     )
     input_batch = clean_inputs
 
-    resample_acts: t.Tensor = src_ablations(model, input_batch, AblationType.RESAMPLE)
+    resample_acts: Dict[int, t.Tensor] = src_ablations(
+        model, input_batch, AblationType.RESAMPLE
+    )
     micro_model_acts = micro_model_src_outs_stack(input_batch)
-    assert t.allclose(resample_acts, micro_model_acts)
+    assert t.allclose(resample_acts[0], micro_model_acts)
 
-    zero_acts: t.Tensor = src_ablations(model, input_batch, AblationType.ZERO)
-    assert t.allclose(zero_acts, t.zeros_like(micro_model_acts))
+    zero_acts: Dict[int, t.Tensor] = src_ablations(
+        model, input_batch, AblationType.ZERO
+    )
+    assert t.allclose(zero_acts[0], t.zeros_like(micro_model_acts))
 
 
 def test_tokenwise_mean_src_ablations(micro_model: t.nn.Module):
@@ -102,20 +108,22 @@ def test_tokenwise_mean_src_ablations(micro_model: t.nn.Module):
     )
     src_outs = micro_model_src_outs_stack(clean_inputs)
     mean_clean_src_outs = src_outs.mean(dim=1, keepdim=True).repeat(1, batch_size, 1, 1)
-    assert t.allclose(tokenwise_mean_clean_ablations, mean_clean_src_outs)
+    assert t.allclose(tokenwise_mean_clean_ablations[0], mean_clean_src_outs)
 
     tokenwise_mean_corrupt_ablations = src_ablations(
         model, micro_dataloader, AblationType.TOKENWISE_MEAN_CORRUPT
     )
     src_outs = micro_model_src_outs_stack(corrupt_inputs)
     mean_corr_src_outs = src_outs.mean(dim=1, keepdim=True).repeat(1, batch_size, 1, 1)
-    assert t.allclose(tokenwise_mean_corrupt_ablations, mean_corr_src_outs)
+    assert t.allclose(tokenwise_mean_corrupt_ablations[0], mean_corr_src_outs)
 
     tokenwise_mean_clean_corr_ablations = src_ablations(
         model, micro_dataloader, AblationType.TOKENWISE_MEAN_CLEAN_AND_CORRUPT
     )
     mean_clean_corrupt_src_outs = (mean_clean_src_outs + mean_corr_src_outs) / 2
-    assert t.allclose(tokenwise_mean_clean_corr_ablations, mean_clean_corrupt_src_outs)
+    assert t.allclose(
+        tokenwise_mean_clean_corr_ablations[0], mean_clean_corrupt_src_outs
+    )
 
 
 # micro_model = micro_model()

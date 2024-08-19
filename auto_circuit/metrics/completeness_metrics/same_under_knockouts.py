@@ -162,7 +162,7 @@ def same_under_knockout(
     patch_masks: Dict[str, t.nn.Parameter] = model.patch_masks
     circuit_threshold = prune_scores_threshold(circuit_ps, circuit_size)
 
-    corrupt_src_outs: Dict[BatchKey, t.Tensor] = batch_src_ablations(
+    corrupt_src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
         model,
         task.test_loader,
         ablation_type=AblationType.RESAMPLE,
@@ -188,7 +188,9 @@ def same_under_knockout(
             t.where(circ, patch.data, t.ones_like(patch.data), out=patch.data)
         # Test the circuit with the knockouts
         for batch in task.test_loader:
-            patch_outs = corrupt_src_outs[batch.key].clone().detach()
+            patch_outs = {
+                k: v.clone().detach() for k, v in corrupt_src_outs[batch.key].items()
+            }
             with patch_mode(model, patch_outs):
                 model_out = model(batch.clean)[model.out_slice]
                 ko_circ_logprobs[batch.key] = log_softmax(model_out, dim=-1)
@@ -199,7 +201,9 @@ def same_under_knockout(
             t.where(circ, patch.data, t.zeros_like(patch.data), out=patch.data)
         knockouts_size = int(sum([mask.sum().item() for mask in mask_params]))
         for batch in task.test_loader:
-            patch_outs = corrupt_src_outs[batch.key].clone().detach()
+            patch_outs = {
+                k: v.clone().detach() for k, v in corrupt_src_outs[batch.key].items()
+            }
             with patch_mode(model, patch_outs):
                 model_out = model(batch.clean)[model.out_slice]
                 ko_model_logprobs[batch.key] = log_softmax(model_out, dim=-1)
@@ -209,7 +213,9 @@ def same_under_knockout(
             # Patch every edge not in the circuit
             patch.data = (~circ).float()
         for batch in task.test_loader:
-            patch_outs = corrupt_src_outs[batch.key].clone().detach()
+            patch_outs = {
+                k: v.clone().detach() for k, v in corrupt_src_outs[batch.key].items()
+            }
             with patch_mode(model, patch_outs):
                 model_out = model(batch.clean)[model.out_slice]
                 circ_logprobs[batch.key] = log_softmax(model_out, dim=-1)

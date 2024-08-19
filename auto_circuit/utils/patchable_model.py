@@ -66,7 +66,7 @@ class PatchableModel(t.nn.Module):
     n_edges: int
     seq_dim: int
     seq_len: Optional[int]
-    wrappers: Set[PatchWrapperImpl]
+    wrappers: Dict[str, Set[PatchWrapperImpl]]
     src_wrappers: Set[PatchWrapperImpl]
     dest_wrappers: Set[PatchWrapperImpl]
     patch_masks: Dict[str, t.nn.Parameter]
@@ -87,7 +87,7 @@ class PatchableModel(t.nn.Module):
         edges: Set[Edge],
         seq_dim: int,
         seq_len: Optional[int],
-        wrappers: Set[PatchWrapperImpl],
+        wrappers: Dict[str, Set[PatchWrapperImpl]],
         src_wrappers: Set[PatchWrapperImpl],
         dest_wrappers: Set[PatchWrapperImpl],
         out_slice: Tuple[slice | int, ...],
@@ -239,6 +239,9 @@ class PatchableModel(t.nn.Module):
 
     def reset_hooks(self) -> Any:
         return self.wrapped_model.reset_hooks()
+
+    def get_stage_for_module(self, module_name: str) -> int:
+        return self.wrappers.get(module_name, set()).pop().stage
 
     @property
     def cfg(self) -> Any:

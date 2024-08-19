@@ -65,7 +65,7 @@ set_all_masks(model, 1.0)
 for edge in sports_players_edges:
     edge.patch_mask(model).data[edge.patch_idx] = 0.0
 
-patches: Dict[BatchKey, t.Tensor] = batch_src_ablations(
+patches: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
     model=model,
     dataloader=test_loader,
     ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,

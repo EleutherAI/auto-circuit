@@ -31,11 +31,14 @@ def activation_magnitude_prune_scores(
     with t.inference_mode():
         for batch in dataloader:
             src_outs = src_ablations(model, batch.clean, AblationType.RESAMPLE)
-            src_out_means = src_outs.mean(dim=list(range(1, src_outs.ndim)))
+            src_out_means = {
+                k: v.mean(dim=list(range(1, v.ndim))) for k, v in src_outs.items()
+            }
             # prune_scores shape = seq_shape + head_shape + [prev_src_count]
             for mod, ps in prune_scores.items():
+                stage = model.get_stage_for_module(mod)
                 n_srcs = ps.size(-1)
-                edge_acts = src_out_means[:n_srcs]
+                edge_acts = src_out_means[stage][:n_srcs]
                 if ps.ndim >= 2:
                     edge_acts = edge_acts.unsqueeze(0).repeat(ps.shape[-2], 1)
                 if ps.ndim >= 3:
