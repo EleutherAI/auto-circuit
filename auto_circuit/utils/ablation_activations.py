@@ -206,6 +206,6 @@ def batch_src_ablations(
             else:
                 input_batch = batch.clean if clean_corrupt == "clean" else batch.corrupt
             patch_outs[batch.key] = src_ablations(
-                model, input_batch.to(model.wrapped_model.device), ablation_type
+                model, input_batch.to(next(model.wrapped_model.parameters()).device), ablation_type
             )
     return patch_outs
