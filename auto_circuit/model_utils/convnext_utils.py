@@ -37,11 +37,11 @@ def simple_graph_nodes(
                     module_name=f"convnextv2.encoder.stages.{stage_idx}.layers.{sub_layer_idx}",
                     layer=layer_idx,
                     stage=stage_idx,
-                    min_layer=layer_idx,
+                    min_layer=layer_idx - 1,
                 )
             )
 
-            if stage_idx < len(model.convnextv2.encoder.stages) - 1:
+            if (stage_idx < len(model.convnextv2.encoder.stages) - 1) or (sub_layer_idx < len(stage.layers) - 1):
                 src_nodes.add(
                     SrcNode(
                         name=f"Stage{stage_idx}.Layer{sub_layer_idx}",
