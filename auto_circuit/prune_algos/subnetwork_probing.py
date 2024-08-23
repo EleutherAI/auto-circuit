@@ -20,6 +20,7 @@ from auto_circuit.utils.graph_utils import (
     set_all_masks,
     train_mask_mode,
 )
+from auto_circuit.utils.misc import get_logits
 from auto_circuit.utils.patch_wrapper import sample_hard_concrete
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import (
@@ -59,6 +60,7 @@ def subnetwork_probing_prune_scores(
     avoid_lambda: float = 1.0,
     faithfulness_target: SP_FAITHFULNESS_TARGET = "kl_div",
     validation_dataloader: Optional[PromptDataLoader] = None,
+    alternate_model: Optional[PatchableModel] = None
 ) -> PruneScores:
     """
     Optimize the edge mask values using gradient descent to maximize the faithfulness of
@@ -107,21 +109,25 @@ def subnetwork_probing_prune_scores(
     n_edges = model.n_edges
     n_avoid = len(avoid_edges or [])
 
+    device = next(iter(model.parameters())).device
+
     clean_logits: Dict[BatchKey, t.Tensor] = {}
     with t.inference_mode():
         for batch in dataloader:
-            clean_logits[batch.key] = model(batch.clean)[out_slice]
+            clean_logits[batch.key] = get_logits(model(batch.clean.to(device)), out_slice)
 
     val_clean_logits: Optional[Dict[BatchKey, t.Tensor]] = None
     if validation_dataloader is not None:
         val_clean_logits = {}
         with t.inference_mode():
             for batch in validation_dataloader:
-                val_clean_out = model(batch.clean)[out_slice]
+                val_clean_out = get_logits(model(batch.clean.to(device)), out_slice)
                 val_clean_logits[batch.key] = log_softmax(val_clean_out, dim=-1)
 
+    ablation_model = alternate_model or model
+
     src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
-        model,
+        ablation_model,
         dataloader,
         # ablation_type=AblationType.RESAMPLE,
         ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,
@@ -131,7 +137,7 @@ def subnetwork_probing_prune_scores(
     val_src_outs: Optional[Dict[BatchKey, Dict[int, t.Tensor]]] = None
     if validation_dataloader is not None:
         val_src_outs = batch_src_ablations(
-            model,
+            ablation_model,
             validation_dataloader,
             # ablation_type=AblationType.RESAMPLE,
             ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,
@@ -153,7 +159,7 @@ def subnetwork_probing_prune_scores(
                     k: v.clone().detach() for k, v in src_outs[batch.key].items()
                 }
                 with patch_mode(model, patch_outs):
-                    train_logits = model(input_batch)[out_slice]
+                    train_logits = get_logits(model(input_batch.to(device)), out_slice)
                     if faithfulness_target == "kl_div":
                         faithful_term = multibatch_kl_div(
                             log_softmax(train_logits, dim=-1),
@@ -215,7 +221,7 @@ def subnetwork_probing_prune_scores(
                         val_input_batch = (
                             val_batch.clean if tree_optimisation else val_batch.corrupt
                         )
-                        val_logits = model(val_input_batch)[out_slice]
+                        val_logits = get_logits(model(val_input_batch.to(device)), out_slice)
                         val_faithful_term = batch_answer_diff_percents(
                             log_softmax(val_logits, dim=-1),
                             val_clean_logits[val_batch.key],

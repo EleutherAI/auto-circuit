@@ -2,8 +2,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import reduce
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Set
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
+from transformers.modeling_outputs import ModelOutput
 import torch as t
 from einops import einsum
 from torch.utils.hooks import RemovableHandle
@@ -228,3 +229,10 @@ def downsample_activations(
     for module in downsample_modules:
         activations = module(activations)
     return activations
+
+
+def get_logits(model_output: t.Tensor | ModelOutput, out_slice: Tuple[slice | int, ...]) -> t.Tensor:
+    if isinstance(model_output, ModelOutput):
+        assert hasattr(model_output, "logits")
+        return model_output.logits[out_slice]
+    return model_output[out_slice]

@@ -117,13 +117,14 @@ def src_ablations(
             handles.add(mod.register_forward_hook(hook_fn))
 
         if ablation_type.mean_over_dataset:
+            device = next(iter(model.parameters())).device
             # Collect activations over the entire dataset and take the mean
             assert isinstance(sample, PromptDataLoader)
             for batch in sample:
                 if ablation_type.clean_dataset:
-                    model(batch.clean)
+                    model(batch.clean.to(device))
                 if ablation_type.corrupt_dataset:
-                    model(batch.corrupt)
+                    model(batch.corrupt.to(device))
             # PromptDataLoader has equal size batches, so we can take the mean of means
             mult = int(ablation_type.clean_dataset) + int(ablation_type.corrupt_dataset)
             assert mult == 2 or mult == 1
@@ -153,7 +154,7 @@ def src_ablations(
                     )
 
         # TODO: handle the case where there are no head dims
-        a_node = next(n for n in src_outs.keys() if n.head_dim is not None)
+        a_node = next((n for n in src_outs.keys() if n.head_dim is not None), next(iter(src_outs)))
         if a_node.sublayer_shape is not None:
             assert a_node.head_dim is not None
             src_outs_per_stage[i] = rearrange(
