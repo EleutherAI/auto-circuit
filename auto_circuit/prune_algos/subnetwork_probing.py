@@ -46,7 +46,7 @@ SP_FAITHFULNESS_TARGET = Literal[
 def subnetwork_probing_prune_scores(
     model: PatchableModel,
     dataloader: PromptDataLoader,
-    official_edges: Optional[Set[Edge]],
+    official_edges: Optional[Set[Edge]] = None,
     learning_rate: float = 0.1,
     epochs: int = 20,
     regularize_lambda: float = 10,
@@ -98,6 +98,9 @@ def subnetwork_probing_prune_scores(
         validation_dataloader: If not `None` the faithfulness metric is also computed on
             this dataloader and plotted in the training graph (if `show_train_graph` is
             `True`).
+        alternate_model: If not `None`, the model used to compute ablations is the 
+            alternate model, otherwise it is the original model. If `tree_optimisation`
+            is `False`, the alternate model is also used to compute the clean logits.
 
     Returns:
         An ordering of the edges by importance to the task. Importance is equal to the
@@ -108,13 +111,14 @@ def subnetwork_probing_prune_scores(
     out_slice = model.out_slice
     n_edges = model.n_edges
     n_avoid = len(avoid_edges or [])
+    ablation_model = alternate_model or model
 
     device = next(iter(model.parameters())).device
 
     clean_logits: Dict[BatchKey, t.Tensor] = {}
     with t.inference_mode():
         for batch in dataloader:
-            clean_logits[batch.key] = get_logits(model(batch.clean.to(device)), out_slice)
+            clean_logits[batch.key] = get_logits(ablation_model(batch.clean.to(device)), out_slice)
 
     val_clean_logits: Optional[Dict[BatchKey, t.Tensor]] = None
     if validation_dataloader is not None:
@@ -124,7 +128,6 @@ def subnetwork_probing_prune_scores(
                 val_clean_out = get_logits(model(batch.clean.to(device)), out_slice)
                 val_clean_logits[batch.key] = log_softmax(val_clean_out, dim=-1)
 
-    ablation_model = alternate_model or model
 
     src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
         ablation_model,
