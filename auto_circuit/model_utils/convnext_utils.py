@@ -68,7 +68,7 @@ def factorized_src_nodes(
             layer=next(layers),
             global_rank=next(src_idxs),
             sublayer_shape=model.convnextv2.embeddings.patch_embeddings.out_channels,
-            stage=0,
+            stage='0',
             head_dim=1,
         )
     )
@@ -84,7 +84,7 @@ def factorized_src_nodes(
                         layer=layer_idx,
                         global_rank=next(src_idxs),
                         sublayer_shape=layer.pwconv2.out_features,
-                        stage=stage_idx,
+                        stage=str(stage_idx),
                         head_dim=1,
                         head_idx=ch_idx,
                     )
@@ -100,29 +100,31 @@ def factorized_dest_nodes(
     layers = count(start=1)
 
     for stage_idx, stage in enumerate(model.convnextv2.encoder.stages):
-        for sub_layer_idx, layer in enumerate(stage.layers):
+        for ref_layer_idx, layer in enumerate(stage.layers):
             layer_idx = next(layers)
             for ch_idx in range(layer.dwconv.in_channels):
                 dest_nodes.add(
                     DestNode(
-                        name=f"Stage{stage_idx}.Layer{sub_layer_idx}.{ch_idx}",
-                        module_name=f"convnextv2.encoder.stages.{stage_idx}.layers.{sub_layer_idx}.dwconv",
+                        name=f"Stage{stage_idx}.Layer{ref_layer_idx}.{ch_idx}",
+                        module_name=f"convnextv2.encoder.stages.{stage_idx}.layers.{ref_layer_idx}.dwconv",
                         layer=layer_idx,
-                        stage=stage_idx,
+                        stage=str(stage_idx),
                         head_dim=1,
                         head_idx=ch_idx,
                         sublayer_shape=layer.pwconv2.out_features,
                     )
                 )
 
+    layer_idx = next(layers)
+
     for ch_idx in range(model.convnextv2.layernorm.normalized_shape[0]):
         dest_nodes.add(
             DestNode(
-                name="Layernorm",
+                name=f"Layernorm.{ch_idx}",
                 module_name="convnextv2.layernorm",
-                layer=next(layers),
+                layer=layer_idx,
                 stage=len(model.convnextv2.encoder.stages),
-                head_dim=2,
+                head_dim=1,
                 head_idx=ch_idx,
                 sublayer_shape=model.convnextv2.layernorm.normalized_shape[0],
             )

@@ -199,7 +199,7 @@ class Node:
     head_dim: Optional[int] = None
     weight: Optional[str] = None
     weight_head_dim: Optional[int] = None
-    stage: int = 0
+    stage: str = "0"
     sublayer_shape: Optional[int] = None
 
     def module(self, model: Any) -> PatchWrapper:
@@ -254,11 +254,11 @@ class SrcNode(Node):
         """
         if self.sublayer_shape is not None:
             if self.head_idx is None:
-                return [self.layer - offset, slice(None)]
-            return [self.layer - offset, self.head_idx]
+                return [self.layer - offset - 1, slice(None)]
+            return [self.layer - offset - 1, self.head_idx]
         else:
             return [
-                self.global_rank - offset,
+                self.global_rank - offset - 1,
             ]
 
 
@@ -309,7 +309,7 @@ class Edge:
         head_idx = [] if self.dest.head_idx is None else [self.dest.head_idx]
         return tuple(seq_idx + head_idx + self.src.offset_slice(self.dest.min_layer))
 
-    def patch_mask(self, model: Any) -> t.nn.Parameter:
+    def patch_mask(self, model: Any) -> t.nn.ParameterDict:
         """The `patch_mask` tensor of the `dest` node."""
         return self.dest.module(model).patch_mask
 

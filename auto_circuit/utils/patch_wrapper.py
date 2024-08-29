@@ -52,6 +52,7 @@ class PatchWrapperImpl(PatchWrapper):
             used to slice the shared `curr_src_outs` tensor and the shared
             `patch_src_outs` tensor, when interpolating the activations of the incoming
             edges.
+        in_stages: 
         stage: The stage of the module in the model. This is used to handle vision
             models where activations are downsampled at each stage.
     """
@@ -65,9 +66,9 @@ class PatchWrapperImpl(PatchWrapper):
         is_src: bool = False,
         src_idxs: Optional[slice] = None,
         is_dest: bool = False,
-        patch_mask: Optional[t.Tensor] = None,
-        in_srcs: Optional[slice] = None,
-        stage: int = 0,
+        patch_mask: Dict[str, t.Tensor | None] = {},
+        in_srcs: Dict[str, slice | None] = {},
+        stage: str = "0",
         downsample_modules: List[t.nn.Module] = [],
         sublayer_index: bool = False,
     ):
@@ -76,9 +77,9 @@ class PatchWrapperImpl(PatchWrapper):
         self.module: t.nn.Module = module
         self.head_dim: Optional[int] = head_dim
         self.seq_dim: Optional[int] = seq_dim
-        self.curr_src_outs: Optional[Dict[int, t.Tensor]] = None
-        self.in_srcs: Optional[slice] = in_srcs
-        self.stage: int = stage
+        self.curr_src_outs: Optional[Dict[str, t.Tensor]] = None
+        self.in_srcs: Dict[str, slice | None] = in_srcs
+        self.stage: str = stage
         self.downsample_modules: List[t.nn.Module] = downsample_modules
         self.sublayer_index: bool = sublayer_index
 
@@ -90,8 +91,8 @@ class PatchWrapperImpl(PatchWrapper):
         self.is_dest = is_dest
         if self.is_dest:
             assert patch_mask is not None
-            self.patch_mask: t.nn.Parameter = t.nn.Parameter(patch_mask)
-            self.patch_src_outs: Optional[Dict[int, t.Tensor]] = None
+            self.patch_mask: t.nn.ParameterDict = t.nn.ParameterDict({stage: t.nn.Parameter(mask) for stage, mask in patch_mask.items()})
+            self.patch_src_outs: Optional[Dict[str, t.Tensor]] = None
             self.mask_fn: MaskFn = None
             self.dropout_layer: t.nn.Module = t.nn.Dropout(p=0.0)
         self.patch_mode = False
@@ -120,17 +121,19 @@ class PatchWrapperImpl(PatchWrapper):
         if batch_size is None and self.batch_size is None:
             return
         if batch_size is None:  # removing batch dim
-            self.patch_mask = t.nn.Parameter(self.patch_mask[0].clone())
+            self.patch_mask = t.nn.ParameterDict({stage: t.nn.Parameter(
+                self.patch_mask[stage].clone()
+                ) for stage in self.patch_mask.keys()})
         elif self.batch_size is None:  # adding batch_dim
-            self.patch_mask = t.nn.Parameter(
-                self.patch_mask.repeat(batch_size, *((1,) * self.patch_mask.ndim))
-            )
+            self.patch_mask = t.nn.ParameterDict({stage: t.nn.Parameter(
+                self.patch_mask[stage].repeat(batch_size, *((1,) * self.patch_mask[stage].ndim))
+                ) for stage in self.patch_mask.keys()})
         elif self.batch_size != batch_size:  # modifying batch dim
-            self.patch_mask = t.nn.Parameter(
-                self.patch_mask[0]
+            self.patch_mask = t.nn.ParameterDict({stage: t.nn.Parameter(
+                self.patch_mask[stage][0]
                 .clone()
-                .repeat(batch_size, *((1,) * self.patch_mask.ndim))
-            )
+                .repeat(batch_size, *((1,) * self.patch_mask[stage].ndim))
+            ) for stage in self.patch_mask.keys()})
         self.batch_size = batch_size
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -142,57 +145,82 @@ class PatchWrapperImpl(PatchWrapper):
                 and self.curr_src_outs is not None
                 and self.stage is not None
             )
-            batch_str = ""
-            head_str = "" if self.head_dim is None else "dest"  # Patch heads separately
-            seq_str = "" if self.seq_dim is None else "seq"  # Patch tokens separately
-            subl_str = (
-                ""
-                if (not self.sublayer_index or self.head_dim is None)
-                else f"d{self.head_dim}"
-            )
-            if self.mask_fn == "hard_concrete":
-                mask = sample_hard_concrete(
-                    self.patch_mask, arg_0.size(0), self.batch_size is not None
+            for stage in self.patch_mask.keys():
+                if stage not in self.patch_src_outs:
+                    continue
+                
+                d_upstream = (
+                    self.patch_src_outs[stage][self.in_srcs[stage]]
+                    - self.curr_src_outs[stage][self.in_srcs[stage]]
                 )
-                batch_str = "batch"  # Sample distribution for each batch element
-            elif self.mask_fn == "sigmoid":
-                mask = t.sigmoid(self.patch_mask)
-            else:
-                assert self.mask_fn is None
-                batch_str = "batch" if self.batch_size is not None else ""
-                mask = self.patch_mask
-            mask = self.dropout_layer(mask)
-            ein_pre = f"{batch_str} {seq_str} {head_str} src {subl_str},\
-                  src batch {self.dims} ..."
-            if self.sublayer_index:
-                ein_post = f"batch {head_str} ..."
-            else:
-                ein_post = f"batch {self.dims} {head_str} ..."
-            d = (
-                self.patch_src_outs[self.stage][self.in_srcs]
-                - self.curr_src_outs[self.stage][self.in_srcs]
-            )
-            arg_0 += einsum(mask, d, f"{ein_pre} -> {ein_post}")
+
+                masked_d = self.apply_mask(d_upstream, arg_0, stage)
+                arg_0 += masked_d
 
         new_args = (arg_0,) + args[1:]
         out = self.module(*new_args, **kwargs)
 
         if self.patch_mode and self.is_src:
-            assert self.curr_src_outs is not None and self.stage in self.curr_src_outs
+            assert self.curr_src_outs is not None
             if self.head_dim is None or self.sublayer_index:
                 src_out = out
             else:
                 squeeze_dim = self.head_dim if self.head_dim < 0 else self.head_dim + 1
                 src_out = t.stack(out.split(1, dim=self.head_dim)).squeeze(squeeze_dim)
-            for stage in range(self.stage, len(self.downsample_modules) + 1):
-                self.curr_src_outs[stage][self.src_idxs] = downsample_activations(
-                    self.downsample_modules[self.stage : stage],
-                    src_out.clone().detach(),
-                    self.stage,
-                    stage,
-                )
+            self.curr_src_outs[self.stage][self.src_idxs] = src_out.clone().detach()
 
         return out
+
+    def apply_mask(self, d_upstream: t.Tensor, arg_0: t.Tensor, stage: str) -> t.Tensor:
+        assert self.curr_src_outs is not None
+        batch_str = ""
+        head_str = "" if self.head_dim is None else "dest"  # Patch heads separately
+        seq_str = "" if self.seq_dim is None else "seq"  # Patch tokens separately
+        subl_str = (
+            ""
+            if (not self.sublayer_index or self.head_dim is None)
+            else f"d{self.head_dim}"
+        )
+        if self.mask_fn == "hard_concrete":
+            mask = sample_hard_concrete(
+                self.patch_mask[stage], arg_0.size(0), self.batch_size is not None
+            )
+            batch_str = "batch"  # Sample distribution for each batch element
+        elif self.mask_fn == "sigmoid":
+            mask = t.sigmoid(self.patch_mask[stage])
+        else:
+            assert self.mask_fn is None
+            batch_str = "batch" if self.batch_size is not None else ""
+            mask = self.patch_mask[stage]
+
+        mask = self.dropout_layer(mask)
+
+        ein_pre = f"{batch_str} {seq_str} {head_str} src {subl_str},\
+                src batch {self.dims} ..."
+        
+        if len(self.downsample_modules) > 0:
+            if self.sublayer_index:
+                ein_post = f"batch {head_str} src {self.dims} ..."
+            else:
+                ein_post = f"batch src {self.dims} {head_str} ..."
+            masked_d_upstream = einsum(mask, d_upstream, f"{ein_pre} -> {ein_post}")
+            masked_d = downsample_activations(self.downsample_modules[int(stage):], masked_d_upstream, self.curr_src_outs[stage][self.in_srcs[stage]])
+
+            if self.sublayer_index:
+                ein_post_final = f"batch {head_str} ..."
+            else:
+                ein_post_final = f"batch {self.dims} {head_str} ..."
+
+            masked_d = einsum(masked_d, f"batch {seq_str} {head_str} src {subl_str} ... -> {ein_post_final}")
+
+        else:
+            if self.sublayer_index:
+                ein_post = f"batch {head_str} ..."
+            else:
+                ein_post = f"batch {self.dims} {head_str} ..."
+            masked_d = einsum(mask, d_upstream, f"{ein_pre} -> {ein_post}")
+
+        return masked_d
 
     def __repr__(self):
         module_str = self.module.name if hasattr(self.module, "name") else self.module

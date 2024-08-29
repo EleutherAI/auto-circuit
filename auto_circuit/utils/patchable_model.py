@@ -55,6 +55,7 @@ class PatchableModel(t.nn.Module):
         kv_caches: A dictionary mapping batch sizes to the past key-value caches of the
             transformer. Only used for transformers.
         wrapped_model: The model to wrap which is being made patchable.
+        patch_idx_to_name: A dictionary mapping patch indices to edge names.
     """
 
     nodes: Set[Node]
@@ -69,7 +70,7 @@ class PatchableModel(t.nn.Module):
     wrappers: Dict[str, Set[PatchWrapperImpl]]
     src_wrappers: Set[PatchWrapperImpl]
     dest_wrappers: Set[PatchWrapperImpl]
-    patch_masks: Dict[str, t.nn.Parameter]
+    patch_masks: t.nn.ParameterDict
     out_slice: Tuple[slice | int, ...]
     is_factorized: bool
     is_transformer: bool
@@ -77,7 +78,7 @@ class PatchableModel(t.nn.Module):
     kv_caches: Optional[Dict[int, HookedTransformerKeyValueCache]]
     wrapped_model: t.nn.Module
     downsample_modules: List[t.nn.Module]
-
+    patch_idx_to_name: Dict[str, Dict[Tuple[int | str, ...], str]]
     def __init__(
         self,
         nodes: Set[Node],
@@ -97,6 +98,7 @@ class PatchableModel(t.nn.Module):
         kv_caches: Tuple[Optional[HookedTransformerKeyValueCache], ...],
         wrapped_model: t.nn.Module,
         downsample_modules: List[t.nn.Module] = [],
+        patch_idx_to_name: Dict[str, Dict[Tuple[int | str, ...], str]] = {},
     ) -> None:
         super().__init__()
         self.nodes = nodes
@@ -113,7 +115,7 @@ class PatchableModel(t.nn.Module):
         self.wrappers = wrappers
         self.src_wrappers = src_wrappers
         self.dest_wrappers = dest_wrappers
-        self.patch_masks = {}
+        self.patch_masks = t.nn.ParameterDict()
         for dest_wrapper in self.dest_wrappers:
             self.patch_masks[dest_wrapper.module_name] = dest_wrapper.patch_mask
         self.out_slice = out_slice
@@ -132,6 +134,7 @@ class PatchableModel(t.nn.Module):
                     self.kv_caches[batch_size] = kv_cache
         self.wrapped_model = wrapped_model
         self.downsample_modules = downsample_modules
+        self.patch_idx_to_name = patch_idx_to_name
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """
@@ -232,7 +235,22 @@ class PatchableModel(t.nn.Module):
         Returns:
             The prune scores corresponding to the current patch masks.
         """
-        return dict([(mod, mask.data) for (mod, mask) in self.patch_masks.items()])
+        if len(self.downsample_modules) > 0:
+            prune_scores = {}
+            for mod, mask in self.patch_masks.items():
+                stage_num = int(self.get_stage_for_module(mod))
+                for stage_num in range(stage_num + 1):
+                    sample_node = next(node for node in self.nodes if node.stage == str(stage_num))
+                    has_head_idx = hasattr(sample_node, 'head_idx')
+                
+                    if has_head_idx:
+                        prune_scores[mod] = mask.data.reshape(mask.shape[0], -1)
+                    else:
+                        prune_scores[mod] = mask.data.mean(dim=-1)
+            
+            return prune_scores
+        else:
+            return dict([(mod, mask['0'].data) for (mod, mask) in self.patch_masks.items()])
 
     def add_hook(self, *args: Any, **kwargs: Any) -> Any:
         return self.wrapped_model.add_hook(*args, **kwargs)
@@ -240,7 +258,7 @@ class PatchableModel(t.nn.Module):
     def reset_hooks(self) -> Any:
         return self.wrapped_model.reset_hooks()
 
-    def get_stage_for_module(self, module_name: str) -> int:
+    def get_stage_for_module(self, module_name: str) -> str:
         return self.wrappers.get(module_name, set()).pop().stage
 
     @property

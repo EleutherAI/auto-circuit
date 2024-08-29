@@ -71,7 +71,7 @@ def patchable_model(
         This function modifies the model, it does not return a new model.
     """
     assert not isinstance(model, PatchableModel), "Model is already patchable"
-    nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len = graph_edges(
+    nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len, patch_idx_to_name = graph_edges(
         model, factorized, separate_qkv, seq_len
     )
     wrappers, src_wrappers, dest_wrappers = make_model_patchable(
@@ -108,8 +108,16 @@ def patchable_model(
         kv_caches=kv_caches,
         wrapped_model=model,
         downsample_modules=downsample_modules,
+        patch_idx_to_name=patch_idx_to_name,
     )
 
+def convert_index_tuple(index: Tuple[int | slice, ...]) -> Tuple[int | str, ...]:
+    if isinstance(index[-1], slice):
+        assert all([isinstance(i, int) for i in index[:-1]])
+        return tuple(i for i in index[:-1] if isinstance(i, int)) + ('None',)
+    else:
+        assert all([isinstance(i, int) for i in index])
+        return tuple(i for i in index if isinstance(i, int))
 
 def graph_edges(
     model: t.nn.Module,
@@ -124,6 +132,7 @@ def graph_edges(
     Set[Edge],
     int,
     Optional[int],
+    Dict[str, Dict[Tuple[int | str, ...], str]],
 ]:
     """
     Get the nodes and edges of the computation graph of the model used for ablation.
@@ -151,10 +160,12 @@ def graph_edges(
                     <code>1</code> because the activations are of shape
                     <code>[batch_size, seq_len, hidden_dim]</code>.
                 <li>The sequence length of the model inputs.</li>
+                <li>A dictionary mapping patch indices to edge names.</li>
             </ol>
     """
     seq_dim = 1
     edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
+    patch_idx_to_name: Dict[str, Dict[Tuple[int | str, ...], str]] = defaultdict(dict)
     if not factorized:
         if isinstance(model, MicroModel):
             srcs, dests = mm_utils.simple_graph_nodes(model)
@@ -190,7 +201,10 @@ def graph_edges(
     nodes: Set[Node] = set(srcs | dests)
     edges = set(list(chain.from_iterable(edge_dict.values())))
 
-    return nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len
+    for edge in edges:
+        patch_idx_to_name[edge.dest.module_name][convert_index_tuple(edge.patch_idx)] = edge.name
+
+    return nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len, patch_idx_to_name
 
 
 def make_model_patchable(
@@ -248,9 +262,9 @@ def make_model_patchable(
         src_idxs_slice = None
         a_node = next(iter(module_nodes))
         head_dim = a_node.head_dim
-        stage = a_node.stage
+        stage = int(a_node.stage)
         assert all([node.head_dim == head_dim for node in module_nodes])
-        assert all([node.stage == stage for node in module_nodes])
+        assert all([int(node.stage) == stage for node in module_nodes])
 
         if is_src := any([type(node) == SrcNode for node in module_nodes]):
             src_nodes_for_module = [n for n in module_nodes if type(n) == SrcNode]
@@ -261,46 +275,50 @@ def make_model_patchable(
                 src_nodes_for_module
             ).global_rank == len(src_nodes_for_module)
 
-        mask, in_srcs = None, None
+        mask: Dict[str, t.Tensor | None] = {str(s): None for s in range(stage + 1)}
+        in_srcs: Dict[str, slice | None] = {str(s): None for s in range(stage + 1)}
+        a_stage_src_node = None
         if is_dest := any([type(node) == DestNode for node in module_nodes]):
             module_dest_count = len([n for n in module_nodes if type(n) == DestNode])
+            n_src_heads = 1
+            for s in range(stage + 1):
+                stage_src_nodes = [n for n in src_nodes if int(n.stage) == s]
+                if factorized:
+                    module_src_nodes = [n for n in src_nodes if n.layer < a_node.layer and int(n.stage) == s]
+                    if a_src_node.sublayer_shape is not None:
+                        n_in_src = len(
+                            set([n.layer for n in module_src_nodes])
+                        )
 
-            if factorized:
-                if a_src_node.sublayer_shape is not None:
-                    n_in_src = len(
-                        set([n.layer for n in src_nodes if n.layer < a_node.layer])
-                    )
+                        n_src_heads = stage_src_nodes[0].sublayer_shape if len(stage_src_nodes) > 0 else None
+                        print(f'stage {s} has {n_src_heads} src heads')
+                    else:
+                        n_in_src = len(module_src_nodes)
+                    n_ignore_src = 0
                 else:
-                    n_in_src = len([n for n in src_nodes if n.layer < a_node.layer])
-                n_ignore_src = 0
-            else:
-                if a_src_node.sublayer_shape is not None:
-                    n_in_src = len(
-                        set([n.layer for n in src_nodes if n.layer + 1 == a_node.layer])
-                    )
-                    n_ignore_src = len(
-                        set([n.layer for n in src_nodes if n.layer + 1 < a_node.layer])
-                    )
-                else:
-                    n_in_src = len(
-                        [n for n in src_nodes if n.layer + 1 == a_node.layer]
-                    )
-                    n_ignore_src = len(
-                        [n for n in src_nodes if n.layer + 1 < a_node.layer]
-                    )
+                    module_src_nodes = [n for n in src_nodes if n.layer + 1 == a_node.layer and int(n.stage) == s]
+                    module_ignore_src = [n for n in src_nodes if n.layer + 1 < a_node.layer and int(n.stage) == s]
+                    if a_src_node.sublayer_shape is not None:
+                        n_in_src = len(
+                            set([n.layer for n in module_src_nodes])
+                        )
+                        n_ignore_src = len(
+                            set([n.layer for n in module_ignore_src])
+                        )
+                        n_src_heads = stage_src_nodes[0].sublayer_shape if len(stage_src_nodes) > 0 else None
+                        print(f'stage {s} has {n_src_heads} src heads')
+                    else:
+                        n_in_src = len(module_src_nodes)
+                        n_ignore_src = len(module_ignore_src)
 
-            if n_in_src == 0:
-                pdb.set_trace()
-            in_srcs = slice(n_ignore_src, n_ignore_src + n_in_src)
-            seq_shape = [seq_len] if seq_len is not None else []
-            head_shape = [module_dest_count] if head_dim is not None else []
-            n_heads = (
-                [a_node.sublayer_shape] if a_node.sublayer_shape is not None else []
-            )
-            mask_shape = seq_shape + head_shape + [n_in_src] + n_heads
-            if mask_shape == [96, 1, 384]:
-                pdb.set_trace()
-            mask = t.zeros(mask_shape, device=device, dtype=dtype, requires_grad=False)
+                in_srcs[str(s)] = slice(n_ignore_src, n_ignore_src + n_in_src)
+                seq_shape = [seq_len] if seq_len is not None else []
+                dest_head_shape = [module_dest_count] if head_dim is not None else []
+                src_n_heads = (
+                    [n_src_heads] if a_node.sublayer_shape is not None and n_src_heads is not None else []
+                )
+                mask_shape = seq_shape + dest_head_shape + [n_in_src] + src_n_heads
+                mask[str(s)] = t.zeros(mask_shape, device=device, dtype=dtype, requires_grad=False)
 
         wrapper = PatchWrapperImpl(
             module_name=module_name,
@@ -312,7 +330,7 @@ def make_model_patchable(
             is_dest=is_dest,
             patch_mask=mask,
             in_srcs=in_srcs,
-            stage=stage,
+            stage=str(stage),
             downsample_modules=downsample_modules[:stage],
             sublayer_index=a_src_node.sublayer_shape is not None
             if a_src_node is not None
@@ -329,9 +347,9 @@ def make_model_patchable(
 @contextmanager
 def patch_mode(
     model: PatchableModel,
-    patch_src_outs: Dict[int, t.Tensor],
+    patch_src_outs: Dict[str, t.Tensor],
     edges: Optional[Collection[str | Edge]] = None,
-    curr_src_outs: Optional[Dict[int, t.Tensor]] = None,
+    curr_src_outs: Optional[Dict[str, t.Tensor]] = None,
 ):
     """
     Context manager to enable patching in the model.
@@ -365,7 +383,8 @@ def patch_mode(
         set_all_masks(model, val=0.0)
         for edge in model.edges:
             if edge in edges or edge.name in edges:
-                edge.patch_mask(model).data[edge.patch_idx] = 1.0
+                for s in range(int(edge.dest.stage) + 1):
+                    edge.patch_mask(model)[str(s)].data[edge.patch_idx] = 1.0
 
     for module_wrappers in model.wrappers.values():
         for wrapper in module_wrappers:
@@ -399,13 +418,15 @@ def set_all_masks(model: PatchableModel, val: float) -> None:
     for module_wrappers in model.wrappers.values():
         for wrapper in module_wrappers:
             if wrapper.is_dest:
-                t.nn.init.constant_(wrapper.patch_mask, val)
+                for s in range(int(wrapper.stage) + 1):
+                    if wrapper.patch_mask[str(s)] is not None:
+                        t.nn.init.constant_(wrapper.patch_mask[str(s)], val)
 
 
 @contextmanager
 def train_mask_mode(
     model: PatchableModel, requires_grad: bool = True
-) -> Iterator[Dict[str, t.nn.Parameter]]:
+) -> Iterator[t.nn.ParameterDict]:
     """
     Context manager that sets the `requires_grad` attribute of the patch masks for the
     duration of the context and yields the parameters.
@@ -423,18 +444,22 @@ def train_mask_mode(
     """
     model.eval()
     model.zero_grad()
-    parameters: Dict[str, t.nn.Parameter] = {}
+    parameters: t.nn.ParameterDict = t.nn.ParameterDict()
     for wrapper in model.dest_wrappers:
-        patch_mask = wrapper.patch_mask
-        patch_mask.detach_().requires_grad_(requires_grad)
-        parameters[wrapper.module_name] = patch_mask
+        for s in range(int(wrapper.stage) + 1):
+            if wrapper.patch_mask[str(s)] is not None:
+                patch_mask = wrapper.patch_mask[str(s)]
+                patch_mask.requires_grad_(requires_grad)
+                parameters[f"{wrapper.module_name}_{s}"] = patch_mask
         wrapper.train()
     try:
         yield parameters
     finally:
         for wrapper in model.dest_wrappers:
+            for s in range(int(wrapper.stage) + 1):
+                if wrapper.patch_mask[str(s)] is not None:
+                    wrapper.patch_mask[str(s)].requires_grad_(False)
             wrapper.eval()
-            wrapper.patch_mask.detach_().requires_grad_(False)
 
 
 @contextmanager

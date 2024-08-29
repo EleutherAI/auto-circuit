@@ -4,6 +4,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
+from transformers.models.convnextv2.modeling_convnextv2 import ConvNextV2LayerNorm
 from transformers.modeling_outputs import ModelOutput
 import torch as t
 from einops import einsum
@@ -222,13 +223,41 @@ def get_most_similar_embeddings(
 def downsample_activations(
     downsample_modules: List[t.nn.Module],
     activations: t.Tensor,
-    src_stage: int,
-    dest_stage: int,
+    clean_activations: t.Tensor,
 ) -> t.Tensor:
 
+    act_shape = activations.shape
+    activations = activations.reshape(-1, *act_shape[3:])
+
     for module in downsample_modules:
-        activations = module(activations)
+        if isinstance(module, ConvNextV2LayerNorm):
+            activations = modified_layernorm(module, activations, clean_activations)
+        else:
+            activations = module(activations)
+
+    activations = activations.reshape(*act_shape[:3], *activations.shape[1:])
     return activations
+
+def modified_layernorm(module: ConvNextV2LayerNorm, activations: t.Tensor, clean_activations: t.Tensor) -> t.Tensor:
+    if module.data_format != "channels_first":
+        raise NotImplementedError("Only channels_first format is supported in this implementation")
+
+    # Compute mean and variance for clean activations
+    clean_mean = clean_activations.mean(1, keepdim=True)
+    clean_var = (clean_activations - clean_mean).pow(2).mean(1, keepdim=True)
+
+    # Recompute mean and variance for each position
+    n = activations.size(1)  # number of channels
+    new_mean = clean_mean - clean_activations / n + activations / n
+    new_var = clean_var - (clean_activations - clean_mean).pow(2) / n + (activations - new_mean).pow(2) / n
+
+    # Normalize activations using the recomputed mean and variance
+    x = (activations - new_mean) / t.sqrt(new_var + module.eps)
+    
+    # Apply weight and bias
+    x = module.weight[:, None, None] * x + module.bias[:, None, None]
+
+    return x
 
 
 def get_logits(model_output: t.Tensor | ModelOutput, out_slice: Tuple[slice | int, ...]) -> t.Tensor:
