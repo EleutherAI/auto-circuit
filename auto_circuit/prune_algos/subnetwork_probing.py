@@ -9,6 +9,7 @@ from typing import Dict, Literal, Optional, Set
 import plotly.graph_objects as go
 import torch as t
 from torch.nn.functional import log_softmax, mse_loss
+from einops import rearrange
 
 from auto_circuit.data import PromptDataLoader
 from auto_circuit.types import AblationType, BatchKey, Edge, MaskFn, PruneScores
@@ -129,28 +130,28 @@ def subnetwork_probing_prune_scores(
                 val_clean_logits[batch.key] = log_softmax(val_clean_out, dim=-1)
 
 
-    src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
+    src_outs: Dict[BatchKey, Dict[str, t.Tensor]] = batch_src_ablations(
         ablation_model,
         dataloader,
-        # ablation_type=AblationType.RESAMPLE,
-        ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,
-        # clean_corrupt="corrupt" if tree_optimisation else "clean",
+        ablation_type=AblationType.RESAMPLE,
+        # ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,
+        clean_corrupt="corrupt" if tree_optimisation else "clean",
     )
 
-    val_src_outs: Optional[Dict[BatchKey, Dict[int, t.Tensor]]] = None
+    val_src_outs: Optional[Dict[BatchKey, Dict[str, t.Tensor]]] = None
     if validation_dataloader is not None:
         val_src_outs = batch_src_ablations(
             ablation_model,
             validation_dataloader,
-            # ablation_type=AblationType.RESAMPLE,
-            ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,
-            # clean_corrupt="corrupt" if tree_optimisation else "clean",
+            ablation_type=AblationType.RESAMPLE,
+            # ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT,
+            clean_corrupt="corrupt" if tree_optimisation else "clean",
         )
 
     losses, faiths, val_faiths, val_stds, regularizes = [], [], [], [], []
     set_all_masks(model, val=init_val if tree_optimisation else -init_val)
     with train_mask_mode(model) as patch_masks, mask_fn_mode(model, mask_fn, dropout_p):
-        mask_params = patch_masks.values()
+        mask_params = list(patch_masks.values())
         optim = t.optim.Adam(mask_params, lr=learning_rate)
         for epoch in (epoch_pbar := tqdm(range(epochs))):
             faith_str = f"{faithfulness_target}: {faiths[-1]:.3f}" if epoch > 0 else ""
@@ -195,7 +196,7 @@ def subnetwork_probing_prune_scores(
                     regularize = n_mask / (circuit_size if circuit_size else n_edges)
                     for edge in avoid_edges or []:  # Penalize banned edges
                         wgt = (-1 if tree_optimisation else 1) * avoid_lambda / n_avoid
-                        penalty = edge.patch_mask(model)[edge.patch_idx]
+                        penalty = t.sum(t.cat([v[edge.patch_idx] for v in edge.patch_mask(model).values()]))
                         const = regularize_const if mask_fn == "hard_concrete" else 0.0
                         if mask_fn is not None:
                             penalty = t.sigmoid(penalty - const)
@@ -235,7 +236,7 @@ def subnetwork_probing_prune_scores(
 
         xtreme_f = max if tree_optimisation else min
         xtreme_torch_f = t.max if tree_optimisation else t.min
-        xtreme_val = abs(xtreme_f([xtreme_torch_f(msk).item() for msk in mask_params]))
+        xtreme_val = abs(xtreme_f([xtreme_torch_f(msk).item() for msk in mask_params if msk.numel() > 0]))
 
     if show_train_graph:
         fig = go.Figure()
@@ -254,6 +255,21 @@ def subnetwork_probing_prune_scores(
 
     sign = -1 if tree_optimisation else 1
     prune_scores: PruneScores = {}
+
     for mod_name, patch_mask in model.patch_masks.items():
-        prune_scores[mod_name] = xtreme_val + sign * patch_mask.detach().clone()
+        masks = []
+        for stage in patch_mask.keys():
+            stage_srcs = [node for node in model.srcs if node.stage == stage]
+            if len(stage_srcs) == 0:
+                continue
+            a_node = stage_srcs[0]
+            if a_node.sublayer_shape is not None:
+                if a_node.head_idx is not None:
+                    flat_mask = rearrange(patch_mask[stage], 'dest_heads l src_heads -> dest_heads (l src_heads)')
+                else:
+                    flat_mask = patch_mask[stage].mean(2)
+            else:
+                flat_mask = patch_mask[stage]
+            masks.append(xtreme_val + sign * flat_mask.detach().clone())
+        prune_scores[mod_name] = t.cat(masks, dim=1)
     return prune_scores

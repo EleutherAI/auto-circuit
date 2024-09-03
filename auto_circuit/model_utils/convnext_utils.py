@@ -22,7 +22,7 @@ def simple_graph_nodes(
             module_name="convnextv2.embeddings",
             layer=next(layers),
             global_rank=next(src_idx_ranks),
-            stage=0,
+            stage='0',
         )
     )
 
@@ -36,7 +36,7 @@ def simple_graph_nodes(
                     name=f"Stage{stage_idx}.Layer{sub_layer_idx}",
                     module_name=f"convnextv2.encoder.stages.{stage_idx}.layers.{sub_layer_idx}",
                     layer=layer_idx,
-                    stage=stage_idx,
+                    stage=str(stage_idx),
                     min_layer=layer_idx - 1,
                 )
             )
@@ -48,7 +48,7 @@ def simple_graph_nodes(
                         module_name=f"convnextv2.encoder.stages.{stage_idx}.layers.{sub_layer_idx}",
                         layer=layer_idx,
                         global_rank=layer_idx,
-                        stage=stage_idx,
+                        stage=str(stage_idx),
                     )
                 )
 
@@ -98,8 +98,12 @@ def factorized_dest_nodes(
 ) -> Set[DestNode]:
     dest_nodes = set()
     layers = count(start=1)
+    layer_idx = next(layers)
+    min_stage_layers = {'0': 0}
 
     for stage_idx, stage in enumerate(model.convnextv2.encoder.stages):
+        if int(stage_idx) > 0:
+            min_stage_layers[str(stage_idx)] = layer_idx + 1
         for ref_layer_idx, layer in enumerate(stage.layers):
             layer_idx = next(layers)
             for ch_idx in range(layer.dwconv.in_channels):
@@ -112,6 +116,7 @@ def factorized_dest_nodes(
                         head_dim=1,
                         head_idx=ch_idx,
                         sublayer_shape=layer.pwconv2.out_features,
+                        min_stage_layers=min_stage_layers,
                     )
                 )
 
@@ -123,10 +128,11 @@ def factorized_dest_nodes(
                 name=f"Layernorm.{ch_idx}",
                 module_name="convnextv2.layernorm",
                 layer=layer_idx,
-                stage=len(model.convnextv2.encoder.stages),
+                stage=str(len(model.convnextv2.encoder.stages)),
                 head_dim=1,
                 head_idx=ch_idx,
                 sublayer_shape=model.convnextv2.layernorm.normalized_shape[0],
+                min_stage_layers=min_stage_layers,
             )
         )
 

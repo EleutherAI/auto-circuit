@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -254,11 +255,11 @@ class SrcNode(Node):
         """
         if self.sublayer_shape is not None:
             if self.head_idx is None:
-                return [self.layer - offset - 1, slice(None)]
-            return [self.layer - offset - 1, self.head_idx]
+                return [self.layer - offset, slice(None)]
+            return [self.layer - offset, self.head_idx]
         else:
             return [
-                self.global_rank - offset - 1,
+                self.global_rank - offset,
             ]
 
 
@@ -267,7 +268,21 @@ class DestNode(Node):
     """A node that is the destination of an edge."""
 
     min_layer: int = 0  # min layer of all incoming SrcNodes (0 in factorized model)
+    min_stage_layers: Optional[Dict[str, int]] = None
 
+    def __hash__(self) -> int:
+        return hash((
+            self.name,
+            self.module_name,
+            self.layer,
+            self.head_idx,
+            self.head_dim,
+            self.weight,
+            self.weight_head_dim,
+            self.stage,
+            self.sublayer_shape,
+            self.min_layer
+        ))
 
 PruneScores = Dict[str, t.Tensor]
 """
@@ -307,7 +322,12 @@ class Edge:
         [`PruneScores`][auto_circuit.types.PruneScores] tensor of the `dest` node."""
         seq_idx = [] if self.seq_idx is None else [self.seq_idx]
         head_idx = [] if self.dest.head_idx is None else [self.dest.head_idx]
-        return tuple(seq_idx + head_idx + self.src.offset_slice(self.dest.min_layer))
+        min_layer = (
+            self.dest.min_stage_layers[self.src.stage]
+            if self.dest.min_stage_layers is not None
+            else self.dest.min_layer
+        )
+        return tuple(seq_idx + head_idx + self.src.offset_slice(min_layer))
 
     def patch_mask(self, model: Any) -> t.nn.ParameterDict:
         """The `patch_mask` tensor of the `dest` node."""

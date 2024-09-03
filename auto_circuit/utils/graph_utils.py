@@ -277,7 +277,6 @@ def make_model_patchable(
 
         mask: Dict[str, t.Tensor | None] = {str(s): None for s in range(stage + 1)}
         in_srcs: Dict[str, slice | None] = {str(s): None for s in range(stage + 1)}
-        a_stage_src_node = None
         if is_dest := any([type(node) == DestNode for node in module_nodes]):
             module_dest_count = len([n for n in module_nodes if type(n) == DestNode])
             n_src_heads = 1
@@ -381,10 +380,9 @@ def patch_mode(
     # TODO: Raise an error if one of the edge names doesn't exist.
     if edges is not None:
         set_all_masks(model, val=0.0)
-        for edge in model.edges:
-            if edge in edges or edge.name in edges:
-                for s in range(int(edge.dest.stage) + 1):
-                    edge.patch_mask(model)[str(s)].data[edge.patch_idx] = 1.0
+        # for edge in model.edges:
+        for edge in edges:# or edge.name in edges:
+            edge.patch_mask(model)[edge.src.stage].data[edge.patch_idx] = 1.0
 
     for module_wrappers in model.wrappers.values():
         for wrapper in module_wrappers:
@@ -450,7 +448,7 @@ def train_mask_mode(
             if wrapper.patch_mask[str(s)] is not None:
                 patch_mask = wrapper.patch_mask[str(s)]
                 patch_mask.requires_grad_(requires_grad)
-                parameters[f"{wrapper.module_name}_{s}"] = patch_mask
+                parameters[f"{wrapper.module_name}_{s}".replace('.', '_')] = patch_mask
         wrapper.train()
     try:
         yield parameters
