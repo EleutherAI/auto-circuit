@@ -110,7 +110,7 @@ def net_viz(
             else:
                 lbl = e.dest.module(model).curr_src_outs[e.src.src_idx]
         else:
-            edge_score = prune_scores[e.dest.module_name][e.patch_idx].item()
+            edge_score = prune_scores[e.dest.module_name][e.flat_patch_idx].item()
             lbl = None
 
         if abs(edge_score) < score_threshold:

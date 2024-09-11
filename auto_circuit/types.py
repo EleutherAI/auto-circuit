@@ -329,6 +329,17 @@ class Edge:
         )
         return tuple(seq_idx + head_idx + self.src.offset_slice(min_layer))
 
+    @property
+    def flat_patch_idx(self) -> Tuple[int | slice, ...]:
+        """The index of the edge in the flattened `patch_mask` tensor of the `dest` node."""
+        if self.src.sublayer_shape is not None:
+            if isinstance(self.patch_idx[-2], int) and isinstance(self.patch_idx[-1], int):
+                return tuple(self.patch_idx[:-2] + (self.patch_idx[-2]*self.src.sublayer_shape + self.patch_idx[-1],))
+            else:
+                return tuple(self.patch_idx[:-2] + (self.patch_idx[-2], ))
+
+        return tuple(self.patch_idx)
+
     def patch_mask(self, model: Any) -> t.nn.ParameterDict:
         """The `patch_mask` tensor of the `dest` node."""
         return self.dest.module(model).patch_mask

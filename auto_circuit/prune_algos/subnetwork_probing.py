@@ -21,7 +21,7 @@ from auto_circuit.utils.graph_utils import (
     set_all_masks,
     train_mask_mode,
 )
-from auto_circuit.utils.misc import get_logits
+from auto_circuit.utils.misc import get_logits, flatten_patch_masks
 from auto_circuit.utils.patch_wrapper import sample_hard_concrete
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import (
@@ -256,20 +256,8 @@ def subnetwork_probing_prune_scores(
     sign = -1 if tree_optimisation else 1
     prune_scores: PruneScores = {}
 
-    for mod_name, patch_mask in model.patch_masks.items():
-        masks = []
-        for stage in patch_mask.keys():
-            stage_srcs = [node for node in model.srcs if node.stage == stage]
-            if len(stage_srcs) == 0:
-                continue
-            a_node = stage_srcs[0]
-            if a_node.sublayer_shape is not None:
-                if a_node.head_idx is not None:
-                    flat_mask = rearrange(patch_mask[stage], 'dest_heads l src_heads -> dest_heads (l src_heads)')
-                else:
-                    flat_mask = patch_mask[stage].mean(2)
-            else:
-                flat_mask = patch_mask[stage]
-            masks.append(xtreme_val + sign * flat_mask.detach().clone())
-        prune_scores[mod_name] = t.cat(masks, dim=1)
+    patch_masks = flatten_patch_masks(model.patch_masks, model)
+
+    for mod_name, patch_mask in patch_masks.items():
+        prune_scores[mod_name] = xtreme_val + sign * patch_mask.detach().clone()
     return prune_scores

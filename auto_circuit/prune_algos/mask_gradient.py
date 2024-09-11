@@ -14,6 +14,7 @@ from auto_circuit.utils.graph_utils import (
 )
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import batch_avg_answer_diff, batch_avg_answer_val
+from auto_circuit.utils.misc import get_logits, flatten_patch_mask_grads
 
 
 def mask_gradient_prune_scores(
@@ -26,6 +27,7 @@ def mask_gradient_prune_scores(
     integrated_grad_samples: Optional[int] = None,
     ablation_type: AblationType = AblationType.RESAMPLE,
     clean_corrupt: Optional[Literal["clean", "corrupt"]] = "corrupt",
+    alternate_model: Optional[PatchableModel] = None
 ) -> PruneScores:
     """
     Prune scores equal to the gradient of the mask values that interpolates the edges
@@ -49,6 +51,8 @@ def mask_gradient_prune_scores(
         ablation_type: The type of ablation to perform.
         clean_corrupt: Whether to use the clean or corrupt inputs to calculate the
             ablations.
+        alternate_model: If not `None`, the model used to compute ablations is the 
+            alternate model, otherwise it is the original model.
 
     Returns:
         An ordering of the edges by importance to the task. Importance is equal to the
@@ -62,9 +66,12 @@ def mask_gradient_prune_scores(
     assert (mask_val is not None) ^ (integrated_grad_samples is not None)  # ^ means XOR
     model = model
     out_slice = model.out_slice
+    ablation_model = alternate_model or model
 
-    src_outs: Dict[BatchKey, Dict[int, t.Tensor]] = batch_src_ablations(
-        model,
+    device = next(model.parameters()).device
+
+    src_outs: Dict[BatchKey, Dict[str, t.Tensor]] = batch_src_ablations(
+        ablation_model,
         dataloader,
         ablation_type=ablation_type,
         clean_corrupt=clean_corrupt,
@@ -85,7 +92,7 @@ def mask_gradient_prune_scores(
                     k: v.clone().detach() for k, v in src_outs[batch.key].items()
                 }
                 with patch_mode(model, patch_src_outs):
-                    logits = model(batch.clean)[out_slice]
+                    logits = get_logits(model(batch.clean.to(device)), out_slice)
                     if grad_function == "logit":
                         token_vals = logits
                     elif grad_function == "prob":
@@ -111,8 +118,9 @@ def mask_gradient_prune_scores(
                     loss.backward()
 
     prune_scores: PruneScores = {}
-    for dest_wrapper in model.dest_wrappers:
-        grad = dest_wrapper.patch_mask.grad
+    patch_mask_grads = flatten_patch_mask_grads(model.patch_masks, model)
+    for mod_name, patch_mask_grad in patch_mask_grads.items():
+        grad = patch_mask_grad
         assert grad is not None
-        prune_scores[dest_wrapper.module_name] = grad.detach().clone()
+        prune_scores[mod_name] = grad.detach().clone()
     return prune_scores

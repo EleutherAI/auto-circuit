@@ -36,9 +36,11 @@ def sample_hard_concrete(
 
 
 def indices_vals(vals: t.Tensor, indices: t.Tensor) -> t.Tensor:
-    assert vals.ndim == indices.ndim
+    if vals.ndim == indices.ndim + 1:
+        indices = indices.unsqueeze(-1)
+    else:
+        assert vals.ndim == indices.ndim
     return t.gather(vals, dim=-1, index=indices)
-
 
 def vocab_avg_val(vals: t.Tensor, indices: t.Tensor) -> t.Tensor:
     return indices_vals(vals, indices).mean()
@@ -62,7 +64,7 @@ def batch_avg_answer_val(
     """
     answers = batch.answers if not wrong_answer else batch.wrong_answers
     if isinstance(answers, t.Tensor):
-        return vocab_avg_val(vals, answers)
+        return vocab_avg_val(vals, answers.to(vals.device))
     else:
         # If each prompt has a different number of answers we have a list of tensor
         assert isinstance(answers, list)
@@ -85,8 +87,8 @@ def batch_answer_diffs(vals: t.Tensor, batch: PromptPairBatch) -> t.Tensor:
         The difference between the average value of the correct answers and the average
         value of the wrong answers for each prompt in the batch.
     """
-    answers = batch.answers
-    wrong_answers = batch.wrong_answers
+    answers = batch.answers.to(vals.device)
+    wrong_answers = batch.wrong_answers.to(vals.device)
     if isinstance(answers, t.Tensor) and isinstance(wrong_answers, t.Tensor):
         # We don't use vocab_avg_val here because we need to calculate the average
         # difference between the correct and wrong answers not the difference between

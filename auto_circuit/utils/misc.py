@@ -2,12 +2,17 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import reduce
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, TYPE_CHECKING
+from collections import defaultdict
+
+if TYPE_CHECKING:
+    from auto_circuit.utils.patchable_model import PatchableModel
 
 from transformers.models.convnextv2.modeling_convnextv2 import ConvNextV2LayerNorm
 from transformers.modeling_outputs import ModelOutput
 import torch as t
-from einops import einsum
+from torch.nn import ParameterDict
+from einops import einsum, rearrange
 from torch.utils.hooks import RemovableHandle
 
 
@@ -265,3 +270,51 @@ def get_logits(model_output: t.Tensor | ModelOutput, out_slice: Tuple[slice | in
         assert hasattr(model_output, "logits")
         return model_output.logits[out_slice]
     return model_output[out_slice]
+
+
+def flatten_patch_masks(patch_masks: ParameterDict, model: "PatchableModel") -> dict[str, t.Tensor]:
+    """
+    Convert a possibly 2D patch mask to a flat 1D tensor.
+    """
+    flat_masks_lists: dict[str, list[t.Tensor]] = defaultdict(list)
+    for mod_name, patch_mask in patch_masks.items():
+        for stage in patch_mask.keys():
+            stage_srcs = [node for node in model.srcs if node.stage == stage]
+            if len(stage_srcs) == 0:
+                continue
+            a_node = stage_srcs[0]
+            if a_node.sublayer_shape is not None:
+                if a_node.head_idx is not None:
+                    flat_masks_lists[mod_name].append(rearrange(patch_mask[stage], 'dest_heads l src_heads -> dest_heads (l src_heads)'))
+                else:
+                    flat_masks_lists[mod_name].append(patch_mask[stage].mean(2))
+            else:
+                flat_masks_lists[mod_name].append(patch_mask[stage])
+
+    flat_masks: dict[str, t.Tensor] = {mod_name: t.cat(tensor_list, dim=1) for mod_name, tensor_list in flat_masks_lists.items()}
+    return flat_masks
+
+def flatten_patch_mask_grads(patch_masks: ParameterDict, model: "PatchableModel") -> dict[str, t.Tensor]:
+    """
+    Convert possibly 2D patch mask gradients to flat 1D tensors.
+    """
+    flat_grad_lists: dict[str, list[t.Tensor]] = defaultdict(list)
+    for mod_name, patch_mask in patch_masks.items():
+        for stage in patch_mask.keys():
+            stage_srcs = [node for node in model.srcs if node.stage == stage]
+            if len(stage_srcs) == 0:
+                continue
+            a_node = stage_srcs[0]
+            grad = patch_mask[stage].grad
+            if grad is None:
+                continue
+            if a_node.sublayer_shape is not None:
+                if a_node.head_idx is not None:
+                    flat_grad_lists[mod_name].append(rearrange(grad, 'dest_heads l src_heads -> dest_heads (l src_heads)'))
+                else:
+                    flat_grad_lists[mod_name].append(grad.mean(2))
+            else:
+                flat_grad_lists[mod_name].append(grad)
+
+    flat_grads: dict[str, t.Tensor] = {mod_name: t.cat(tensor_list, dim=1) for mod_name, tensor_list in flat_grad_lists.items()}
+    return flat_grads
