@@ -117,7 +117,6 @@ class PatchWrapperImpl(PatchWrapper):
         Args:
             batch_size: The batch size of the patch mask.
         """
-        pdb.set_trace()
         if batch_size is None and self.batch_size is None:
             return
         if batch_size is None:  # removing batch dim
@@ -197,7 +196,6 @@ class PatchWrapperImpl(PatchWrapper):
 
         ein_pre = f"{batch_str} {seq_str} {head_str} src {subl_str},\
                 src batch {self.dims} ..."
-        
         if len(self.downsample_modules) > 0:
             if self.sublayer_index:
                 ein_post = f"batch {head_str} src {self.dims} ..."

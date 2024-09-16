@@ -1,7 +1,7 @@
 from typing import Dict, Literal, Optional, Set
 
 import torch as t
-from torch.nn.functional import log_softmax
+from torch.nn.functional import log_softmax, kl_div
 
 from auto_circuit.data import PromptDataLoader
 from auto_circuit.types import AblationType, BatchKey, Edge, PruneScores
@@ -22,7 +22,7 @@ def mask_gradient_prune_scores(
     dataloader: PromptDataLoader,
     official_edges: Optional[Set[Edge]],
     grad_function: Literal["logit", "prob", "logprob", "logit_exp"],
-    answer_function: Literal["avg_diff", "avg_val", "mse"],
+    answer_function: Literal["avg_diff", "avg_val", "mse", "daat"],
     mask_val: Optional[float] = None,
     integrated_grad_samples: Optional[int] = None,
     ablation_type: AblationType = AblationType.RESAMPLE,
@@ -86,7 +86,6 @@ def mask_gradient_prune_scores(
             else:
                 assert mask_val is not None and integrated_grad_samples is None
                 set_all_masks(model, val=mask_val)
-
             for batch in dataloader:
                 patch_src_outs = {
                     k: v.clone().detach() for k, v in src_outs[batch.key].items()
@@ -112,6 +111,10 @@ def mask_gradient_prune_scores(
                         loss = -batch_avg_answer_val(token_vals, batch)
                     elif answer_function == "mse":
                         loss = t.nn.functional.mse_loss(token_vals, batch.answers)
+                    elif answer_function == "daat":
+                        target_logits = get_logits(ablation_model(batch.clean.to(device)), out_slice).detach()
+                        loss = kl_div(log_softmax(logits, dim=-1), t.softmax(target_logits, dim=-1), reduction='batchmean')
+ 
                     else:
                         raise ValueError(f"Unknown answer_function: {answer_function}")
 
