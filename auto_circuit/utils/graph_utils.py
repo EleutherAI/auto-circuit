@@ -349,6 +349,7 @@ def patch_mode(
     patch_src_outs: Dict[str, t.Tensor],
     edges: Optional[Collection[str | Edge]] = None,
     curr_src_outs: Optional[Dict[str, t.Tensor]] = None,
+    patch_masks: Optional[t.nn.ParameterDict] = None,
 ):
     """
     Context manager to enable patching in the model.
@@ -371,18 +372,23 @@ def patch_mode(
     Warning:
         This function modifies the state of the model! This is a likely source of bugs.
     """
-    if curr_src_outs is None:
+    if curr_src_outs is None and patch_src_outs is not None:
         curr_src_outs = {
             k: t.zeros_like(v, device=v.device, dtype=v.dtype)
             for k, v in patch_src_outs.items()
         }
 
-    # TODO: Raise an error if one of the edge names doesn't exist.
-    if edges is not None:
-        set_all_masks(model, val=0.0)
-        # for edge in model.edges:
-        for edge in edges:# or edge.name in edges:
-            edge.patch_mask(model)[edge.src.stage].data[edge.patch_idx] = 1.0
+    if patch_masks is not None:
+        for k, v in model.patch_masks.items():
+            for k2, v2 in v.items():
+                v[k2].data = patch_masks[k][k2].data
+    else:
+        # TODO: Raise an error if one of the edge names doesn't exist.
+        if edges is not None:
+            set_all_masks(model, val=0.0)
+            # for edge in model.edges:
+            for edge in edges:# or edge.name in edges:
+                edge.patch_mask(model)[edge.src.stage].data[edge.patch_idx] = 1.0
 
     for module_wrappers in model.wrappers.values():
         for wrapper in module_wrappers:
@@ -391,7 +397,7 @@ def patch_mode(
             if wrapper.is_dest:
                 wrapper.patch_src_outs = patch_src_outs
     try:
-        yield
+        yield {k: {k2: v[k2].clone().detach() for k2 in v} for k, v in model.patch_masks.items()}
     finally:
         for module_wrappers in model.wrappers.values():
             for wrapper in module_wrappers:
